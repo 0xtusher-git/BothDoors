@@ -1,0 +1,37 @@
+{
+  "name": "bothdoors",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BothDoors — a USDC payment listener built on Arc. Detects ERC-20 transfers AND native USDC sends.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx scripts/selftest.mts",
+    "verify:constants": "tsx scripts/verify-constants.mts",
+    "verify:live": "tsx scripts/verify-constants.mts --rpc",
+    "verify:two-doors": "tsx scripts/verify-two-doors.mts",
+    "verify:e2e": "tsx scripts/live-e2e.mts",
+    "verify:browser": "tsx scripts/browser-smoke.mts",
+    "verify:hydration": "tsx scripts/verify-hydration.mts"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.62.7",
+    "next": "^15.5.26",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "viem": "^2.21.55",
+    "wagmi": "^2.14.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

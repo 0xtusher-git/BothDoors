@@ -1,0 +1,405 @@
+/**
+ * Hydration regression test.
+ *
+ * Reproduces the original bug: with a wallet already connected, wagmi
+ * rehydrates from localStorage synchronously (ssr: false => skipHydration is
+ * false), so useAccount() is already `isConnected` on the FIRST client render.
+ * The server has no wallet, so it renders "Connect wallet" — and React used to
+ * report a hydration mismatch.
+ *
+ * Runs the real built app in headless Chrome with a mock EIP-1193 provider and a
+ * pre-seeded wagmi store, then asserts:
+ *   1. SSR HTML says "Connect wallet" (no wallet on the server)
+ *   2. no hydration error / mismatch in the console
+ *   3. the connected address DOES appear after mount (the gate is not just
+ *      hiding the state forever)
+ */
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { access } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { startProductionServer } from "./serve-production.mts";
+
+const CHROME_CANDIDATES = [
+  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+];
+
+const PORT = 3123;
+const CDP_PORT = 3124;
+const BASE = `http://localhost:${PORT}`;
+
+/** Any valid address; the mock provider never touches a real wallet. */
+const ACCOUNT = "0x4ae0358e1c6b0e4e2a0f8ab9d3c1e5f7a910fee0";
+const CHAIN_ID = 5042;
+/** A hash for a transaction that is never mined, so no log ever arrives for it. */
+const FAKE_TX_HASH = "0xdeadbeef00000000000000000000000000000000000000000000000000000001";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Injected before any page script: a fake EIP-1193 wallet. */
+function seedScript(): string {
+  return `
+    (() => {
+      const ACCOUNT = ${JSON.stringify(ACCOUNT)};
+      const listeners = {};
+      const calls = [];
+      window.__mockCalls = calls;
+      let chainId = ${CHAIN_ID};
+      const hex = (id) => "0x" + id.toString(16);
+      // A wallet can be switched between networks. Firing chainChanged is what
+      // wagmi actually listens for, so the app must react the way it would with
+      // a real wallet rather than the way it would on a fresh page load.
+      window.__mockSetChain = (id) => {
+        chainId = id;
+        for (const fn of listeners.chainChanged ?? []) fn(hex(id));
+      };
+      const provider = {
+        isMetaMask: true,
+        isConnected: () => true,
+        get chainId() { return hex(chainId); },
+        selectedAddress: ACCOUNT,
+        request: async ({ method, params }) => {
+          calls.push(method);
+          switch (method) {
+            case "eth_accounts":
+            case "eth_requestAccounts":
+              return [ACCOUNT];
+            case "eth_chainId":
+              return hex(chainId);
+            case "net_version":
+              return String(chainId);
+            case "wallet_switchEthereumChain": {
+              const [target] = params ?? [];
+              chainId = parseInt(String(target?.chainId ?? "0x0"), 16);
+              for (const fn of listeners.chainChanged ?? []) fn(hex(chainId));
+              return null;
+            }
+            case "eth_sendTransaction":
+              // The app only needs a hash back; no log will ever arrive for it,
+              // which is exactly the state the network-switch test needs.
+              return ${JSON.stringify(FAKE_TX_HASH)};
+            case "eth_getTransactionCount":
+              return "0x7";
+            case "eth_estimateGas":
+              return "0x5208";
+            case "eth_gasPrice":
+            case "eth_maxPriorityFeePerGas":
+              return "0x3b9aca00";
+            case "eth_getBalance":
+              return "0x21e19e0c9bab2400000";
+            case "eth_blockNumber":
+              return "0x112a880";
+            case "eth_call":
+              return "0x";
+            case "eth_getCode":
+              return "0x";
+            default:
+              // be permissive: wagmi probes a lot of optional methods
+              return null;
+          }
+        },
+        on: (event, fn) => { (listeners[event] ||= []).push(fn); },
+        removeListener: (event, fn) => {
+          listeners[event] = (listeners[event] || []).filter((f) => f !== fn);
+        },
+      };
+      Object.defineProperty(window, "ethereum", { value: provider, configurable: true });
+    })();
+  `;
+}
+
+async function findBrowser(): Promise<string | null> {
+  for (const candidate of CHROME_CANDIDATES) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      /* next */
+    }
+  }
+  return null;
+}
+
+async function main() {
+  const browserPath = await findBrowser();
+  if (!browserPath) {
+    console.log("No Chrome or Edge found, skipping the hydration test.");
+    return;
+  }
+
+  let failures = 0;
+  const check = (label: string, pass: boolean, detail?: unknown) => {
+    if (pass) {
+      console.log(`  ok    ${label}`);
+    } else {
+      failures += 1;
+      console.log(`  FAIL  ${label}${detail === undefined ? "" : ` -> ${String(detail)}`}`);
+    }
+  };
+
+  // 1. what the server actually sent
+  const server = await startProductionServer(PORT, "hydration");
+  try {
+    await server.ready();
+  } catch (cause) {
+    check("server started", false, cause instanceof Error ? cause.message : String(cause));
+    server.stop();
+    process.exit(1);
+  }
+  check("server started", true);
+
+  const ssrHtml = await (await fetch(BASE)).text();
+  check("SSR HTML renders the connect button, not an address", ssrHtml.includes("Connect wallet"));
+  check("SSR HTML has no wallet address", !ssrHtml.includes("0x4ae035"), "address leaked into SSR HTML");
+
+  // 2. the client, with a wallet already connected
+  const profile = mkdtempSync(path.join(tmpdir(), "hydration-"));
+  const chrome = spawn(
+    browserPath,
+    [
+      "--headless=new",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-extensions",
+      `--remote-debugging-port=${CDP_PORT}`,
+      `--user-data-dir=${profile}`,
+      "about:blank",
+    ],
+    { stdio: "ignore" },
+  );
+  process.on("exit", () => {
+    try {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      /* best effort */
+    }
+  });
+
+  let wsUrl = "";
+  for (let i = 0; i < 40; i++) {
+    await sleep(500);
+    try {
+      const res = await fetch(`http://localhost:${CDP_PORT}/json/version`);
+      wsUrl = ((await res.json()) as { webSocketDebuggerUrl?: string }).webSocketDebuggerUrl ?? "";
+      if (wsUrl) break;
+    } catch {
+      /* not yet */
+    }
+  }
+  if (!wsUrl) {
+    check("browser devtools endpoint", false, "never came up");
+    chrome.kill();
+    server.stop();
+    process.exit(1);
+  }
+
+  const ws = new WebSocket(wsUrl);
+  await once(ws, "open");
+  let nextId = 0;
+  const pending = new Map<number, (v: any) => void>();
+  const events: { method: string; params: any }[] = [];
+  let sessionId: string | undefined;
+
+  ws.addEventListener("message", (e) => {
+    const m = JSON.parse(String((e as MessageEvent).data)) as any;
+    if (typeof m.id === "number") {
+      pending.get(m.id)?.(m);
+      pending.delete(m.id);
+      return;
+    }
+    if (sessionId && m.sessionId === sessionId) events.push(m);
+  });
+
+  const send = async (method: string, params: Record<string, unknown> = {}, withSession = true) => {
+    const id = ++nextId;
+    const res = await new Promise<any>((resolve) => {
+      pending.set(id, resolve);
+      ws.send(JSON.stringify({ id, method, params, ...(withSession && sessionId ? { sessionId } : {}) }));
+    });
+    if (res.error) throw new Error(`${method}: ${JSON.stringify(res.error)}`);
+    return res.result;
+  };
+
+  const target = await send("Target.createTarget", { url: "about:blank" }, false);
+  sessionId = (await send("Target.attachToTarget", { targetId: target.targetId, flatten: true }, false)).sessionId;
+  for (const m of ["Runtime.enable", "Log.enable", "Page.enable"]) await send(m);
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: seedScript() });
+
+  // Phase 1: connect once, the way a user would, so wagmi writes its OWN
+  // persisted store (the connector uid is generated per module instance, so it
+  // cannot be guessed from outside the page).
+  await send("Page.navigate", { url: `${BASE}/` });
+  await sleep(7000);
+
+  const evaluate = async (expr: string) =>
+    (await send("Runtime.evaluate", { expression: expr, returnByValue: true }))?.result?.value;
+
+  const walletButtonText = () =>
+    evaluate(
+      `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /disconnect|Connect wallet|No wallet/.test(x.textContent)); return b ? b.textContent.trim() : null; })()`,
+    ) as Promise<string | null>;
+
+  await evaluate(
+    `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /Connect wallet/.test(x.textContent)); if (b) b.click(); })()`,
+  );
+  for (let i = 0; i < 20; i++) {
+    await sleep(1000);
+    if (/disconnect/.test((await walletButtonText()) ?? "")) break;
+  }
+  check(
+    "phase 1: mock wallet connected",
+    /disconnect/.test((await walletButtonText()) ?? ""),
+    await walletButtonText(),
+  );
+  const stored = await evaluate(`localStorage.getItem('wagmi.store')`);
+  const hasAccounts = typeof stored === "string" && /"accounts":\s*\[\s*"0x/i.test(stored);
+  check("phase 1: wagmi persisted a real account", hasAccounts, String(stored).slice(0, 120));
+
+  // Phase 2: reload. wagmi now rehydrates synchronously from localStorage, so
+  // useAccount() is connected on the FIRST client render while the server HTML
+  // says "Connect wallet" — the exact mismatch that was reported.
+  events.length = 0;
+  await send("Page.navigate", { url: `${BASE}/` });
+  await sleep(8000);
+
+  const consoleText = [
+    ...events
+      .filter((e) => e.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(e.params.type))
+      .map((e) => `${e.params.type}: ${(e.params.args ?? []).map((a: any) => a.value ?? a.description ?? a.type).join(" ")}`),
+    ...events
+      .filter((e) => e.method === "Log.entryAdded" && ["error", "warning"].includes(e.params.entry?.level))
+      .map((e) => `${e.params.entry.level}: ${e.params.entry.text}`),
+  ];
+
+  const hydrationIssues = [
+    ...consoleText.filter((t) => /hydrat|did not match|server rendered|Text content does not match/i.test(t)),
+    // In a production build React throws instead of warning, so the mismatch
+    // surfaces as a minified error: #418 (server HTML didn't match the client),
+    // #423 (error while hydrating) or #425 (text content does not match).
+    ...events
+      .filter((e) => e.method === "Runtime.exceptionThrown")
+      .map(
+        (e) =>
+          e.params.exceptionDetails?.exception?.description ??
+          e.params.exceptionDetails?.text ??
+          "",
+      )
+      .filter((t) => /#418|#423|#425|hydrat/i.test(t)),
+  ];
+  check(
+    "no hydration mismatch with a pre-connected wallet",
+    hydrationIssues.length === 0,
+    hydrationIssues.join(" | ").slice(0, 300),
+  );
+
+  const exceptions = events
+    .filter((e) => e.method === "Runtime.exceptionThrown")
+    .map((e) => e.params.exceptionDetails?.exception?.description ?? e.params.exceptionDetails?.text ?? "");
+  check("no uncaught exceptions", exceptions.length === 0, exceptions.join(" | ").slice(0, 300));
+
+  const body = (await evaluate("document.body.innerText")) as string;
+  const walletButton = await walletButtonText();
+
+  check(
+    "phase 2: wallet still connected after reload (test has teeth)",
+    Boolean(walletButton && /disconnect/.test(walletButton)),
+    walletButton,
+  );
+  check("connected address is shown after mount", body.includes("0x4ae035"), walletButton);
+
+  // Phase 3: pay on one network, switch to the other. The pending state names a
+  // transaction on a specific chain, so the new chain must not inherit it —
+  // "Waiting for a token payment…" on a network nothing was paid on was the
+  // reported bug, and its explorer link pointed at the wrong network too.
+  //
+  // Switched with the app's own network toggle rather than by poking the wallet,
+  // because that is the real user path and it moves the wallet with it, keeping
+  // paying enabled.
+  const bodyText = async () => (await evaluate("document.body.innerText")) as string;
+  const waitingFor = async () => /Waiting for a .* payment/i.test(await bodyText());
+  const clickToggle = async (label: string) => {
+    await evaluate(
+      `(() => {
+        const b = Array.from(document.querySelectorAll('button')).find(x => x.textContent.trim() === ${JSON.stringify(label)});
+        if (!b) return 'missing';
+        b.click();
+        return 'clicked';
+      })()`,
+    );
+    await sleep(7000);
+  };
+  const clickPay = async (label: RegExp) =>
+    (await evaluate(
+      `(() => {
+        const b = Array.from(document.querySelectorAll('button')).find(x => ${label.toString()}.test(x.textContent));
+        if (!b) return 'missing';
+        if (b.disabled) {
+          // Report why, so a failure names the rule that blocked it instead of
+          // just "disabled".
+          const note = Array.from(document.querySelectorAll('p')).find(x => /wallet is on|merchant address|still connecting|Connect a wallet/i.test(x.textContent || ''));
+          return 'disabled: ' + ((note && note.textContent.trim().replace(/\\s+/g, ' ')) || 'no reason shown');
+        }
+        b.click();
+        return 'clicked';
+      })()`,
+    )) as string;
+
+  // Testnet is not the default here, so select it, pay, then move back.
+  await clickToggle("Testnet");
+  const testnetActive = (await evaluate(
+    `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => x.textContent.trim() === 'Testnet'); return b ? /text-door-accent/.test(b.className) : null; })()`,
+  )) as boolean | null;
+  check("phase 3: demo moved to testnet", testnetActive === true, `testnet toggle active=${testnetActive}`);
+
+  const clickResult = await clickPay(/Pay \$1 as token/);
+  check("phase 3: token pay button is clickable", clickResult === "clicked", clickResult);
+
+  for (let i = 0; i < 15 && !(await waitingFor()); i++) await sleep(1000);
+  check("phase 3: it waits for the payment on testnet", await waitingFor(), (await bodyText()).replace(/\s+/g, " ").slice(0, 160));
+
+  await clickToggle("Mainnet");
+  check(
+    "phase 3: the new chain does not claim to be waiting for testnet's payment",
+    !(await waitingFor()),
+    (await bodyText()).replace(/\s+/g, " ").slice(0, 160),
+  );
+  // The wrong-chain explorer link lives in an href, not in the text, so read the
+  // links rather than the words: a testnet hash shown against mainnet would look
+  // fine to a text match.
+  const explorerHrefs = async () =>
+    ((await evaluate(
+      `Array.from(document.querySelectorAll('a')).map(a => a.href).filter(h => /\\/tx\\//.test(h)).join(' ')`,
+    )) as string) ?? "";
+  check(
+    "phase 3: no stale testnet transaction link is offered",
+    !(await explorerHrefs()).includes(FAKE_TX_HASH),
+    await explorerHrefs(),
+  );
+  check(
+    "phase 3: no testnet explorer link survives the switch",
+    !(await explorerHrefs()).includes("testnet.arc.io"),
+    await explorerHrefs(),
+  );
+  check(
+    "phase 3: no warning tells the user to switch to the chain they are on",
+    !/is on (Arc Testnet|Arc)[^.]*pointed at \1/.test(await bodyText()),
+    "self-contradictory network message",
+  );
+
+  console.log(`\n${failures === 0 ? "Hydration test passed." : `${failures} hydration check(s) failed.`}`);
+  ws.close();
+  chrome.kill();
+  server.stop();
+  process.exit(failures === 0 ? 0 : 1);
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});

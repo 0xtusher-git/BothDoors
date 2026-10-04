@@ -1,0 +1,17 @@
+# Store text with LF in the repository regardless of the contributor's platform,
+# and check it back out with their platform's line endings. Without this every
+# file shows as modified on Windows after a clone on macOS/Linux and vice versa.
+* text=auto eol=lf
+
+# Binary files, never touched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+
+# Keep lockfiles exactly as the package manager wrote them.
+package-lock.json -text
