@@ -4,7 +4,7 @@
   "private": true,
   "description": "BothDoors — a USDC payment listener built on Arc. Detects ERC-20 transfers AND native USDC sends.",
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev.mjs",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",

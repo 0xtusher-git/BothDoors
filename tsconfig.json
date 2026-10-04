@@ -38,10 +38,11 @@
     "**/*.ts",
     "**/*.tsx",
     ".next-browser/types/**/*.ts",
+    ".next-buildcheck/types/**/*.ts",
     ".next-hydration/types/**/*.ts",
     ".next/types/**/*.ts",
     "next-env.d.ts",
-    ".next-buildcheck/types/**/*.ts"
+    ".next-dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

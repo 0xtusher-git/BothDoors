@@ -47,6 +47,11 @@ npm run dev                    # http://localhost:3000
 
 Node 18.18+.
 
+`npm run dev` builds into `.next-dev`, not `.next`, so a production build can be
+run without taking the dev server down. Sharing one directory is a quiet failure:
+the running server keeps answering 200 on routes it has already recompiled and
+500s the rest, complaining about a vendor chunk file that was never deleted.
+
 ### Env vars
 
 | Variable | Default | What it does |
