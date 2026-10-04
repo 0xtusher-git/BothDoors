@@ -28,6 +28,7 @@ import {
 } from "../lib/watchUsdcPayments.ts";
 import { USDC_ERC20_ADDRESS } from "../lib/chain.ts";
 import { doorFor, EMPTY_FEED, mergeFeed } from "../lib/feed.ts";
+import { identifyLegacyProvider, listWallets } from "../lib/wallets.ts";
 
 const SYSTEM_EMITTER = "0xffffFFFfFFffffffffffffffFfFFFfffFFFfFFfE" as const;
 const MERCHANT = "0x1111111111111111111111111111111111111111" as Address;
@@ -750,6 +751,89 @@ console.log("\nRecovery — an abandoned history read does not lose the payment"
   });
   check("once committed it is not repeated", afterCommit.events.length === 0, afterCommit.events.length);
 }
+
+// --- wallet discovery ------------------------------------------------------
+// listWallets only reads a few fields, so a partial object cast is enough and the
+// tests stay free of wagmi's machinery.
+const fakeConnector = (fields: { id: string; name: string; type?: string; icon?: string }) =>
+  fields as unknown as Parameters<typeof listWallets>[0][number];
+
+const generic = fakeConnector({ id: "injected", name: "Injected", type: "injected" });
+const metaMask = fakeConnector({ id: "io.metamask", name: "MetaMask", type: "injected" });
+const okx = fakeConnector({ id: "com.okex.wallet", name: "OKX Wallet", type: "injected" });
+const phantom = fakeConnector({ id: "app.phantom", name: "Phantom", type: "injected" });
+
+const withSeveral = listWallets([generic, metaMask, okx, phantom]);
+check(
+  "the catch-all connector is hidden when real wallets are known",
+  withSeveral.every((w) => !w.generic) && withSeveral.length === 3,
+  withSeveral.map((w) => `${w.name}${w.generic ? "(generic)" : ""}`),
+);
+check(
+  "every installed wallet is offered",
+  ["MetaMask", "OKX Wallet", "Phantom"].every((n) => withSeveral.some((w) => w.name === n)),
+  withSeveral.map((w) => w.name),
+);
+check(
+  "the catch-all connector is still offered when it is the only wallet",
+  listWallets([generic]).length === 1 && listWallets([generic])[0]?.generic === true,
+  listWallets([generic]).map((w) => w.name),
+);
+check(
+  "no wallet at all yields no rows",
+  listWallets([]).length === 0,
+  listWallets([]).length,
+);
+check(
+  "the same wallet reaching the list twice is shown once",
+  listWallets([metaMask, metaMask, okx]).length === 2,
+  listWallets([metaMask, metaMask, okx]).map((w) => w.name),
+);
+check(
+  "a non-injected connector is never mistaken for the catch-all",
+  listWallets([generic, fakeConnector({ id: "walletConnect", name: "WalletConnect", type: "walletConnect" })])
+    .every((w) => !w.generic),
+  "a named connector was hidden",
+);
+check(
+  "a wallet icon is carried through",
+  listWallets([fakeConnector({ id: "x", name: "X", type: "injected", icon: "data:image/png;base64,AA" })])[0]?.icon ===
+    "data:image/png;base64,AA",
+  "icon lost",
+);
+
+// Brand detection for wallets too old to announce themselves.
+const providerWith = (flags: Record<string, unknown>) => ({ request: () => {}, ...flags });
+check(
+  "Phantom is not mistaken for MetaMask",
+  identifyLegacyProvider(providerWith({ isMetaMask: true, isPhantom: true }), 0)?.name === "Phantom",
+  identifyLegacyProvider(providerWith({ isMetaMask: true, isPhantom: true }), 0)?.name,
+);
+check(
+  "OKX is recognised under either of its two flags",
+  identifyLegacyProvider(providerWith({ isMetaMask: true, isOkxWallet: true }), 0)?.name === "OKX Wallet" &&
+    identifyLegacyProvider(providerWith({ isOKExWallet: true }), 0)?.name === "OKX Wallet",
+  "OKX not detected",
+);
+check(
+  "MetaMask is only claimed when nothing more specific is present",
+  identifyLegacyProvider(providerWith({ isMetaMask: true }), 0)?.name === "MetaMask" &&
+    identifyLegacyProvider(providerWith({ isMetaMask: true, isCoinbaseWallet: true }), 0)?.name ===
+      "Coinbase Wallet",
+  "MetaMask flag misread",
+);
+check(
+  "an unrecognised wallet is still offered, distinctly",
+  identifyLegacyProvider(providerWith({}), 0)?.name === "Browser Wallet" &&
+    identifyLegacyProvider(providerWith({}), 0)?.rdns !==
+      identifyLegacyProvider(providerWith({}), 1)?.rdns,
+  "two unknown wallets collided",
+);
+check(
+  "something without request() is not a wallet",
+  identifyLegacyProvider({}, 0) === null && identifyLegacyProvider(null, 0) === null,
+  "a non-provider was accepted",
+);
 
 console.log(`\n${failures === 0 ? "All checks passed." : `${failures} check(s) failed.`}`);
 process.exit(failures === 0 ? 0 : 1);

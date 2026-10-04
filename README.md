@@ -134,9 +134,10 @@ for the native door. Same `$1`, two decimal bases.
 | 8 | One transaction is never two rows, and the count is honest | `npm test` "Feed counting" — overlapping history/poller batches, StrictMode's double mount, and a 34-payment feed that must report 34 while showing 20 *and still report 34 when re-read after 14 of those rows scrolled out of the window* |
 | 9 | An abandoned history read cannot swallow a payment | `npm test` "Recovery" — a read whose result is discarded leaves the payment still owed, and only a committed read stops re-reporting it |
 | 10 | A rate-limited node does not cost us history | `npm test` "Acceptance test 3e" — a throttled chunk is re-asked at the identical range rather than narrowed, the throttled run requests exactly the ranges an unthrottled one does, and no block of the lookback is left unasked |
+| 11 | Every installed wallet is offered, not just the first | `npm test` "wallet discovery" - the catch-all injected connector is hidden when named wallets exist so one wallet cannot appear twice, and brand detection asserts Phantom and OKX are not misread as MetaMask; `verify:hydration` installs three mock wallets and asserts all three are listed and that picking one is honoured |
 
 ```bash
-npm test                 # 81 checks, synthetic chain, no network needed
+npm test                 # 100 checks, synthetic chain, no network needed
 npm run typecheck        # tsc --noEmit, strict
 npm run build            # production build
 
@@ -192,6 +193,32 @@ often it is offered. Two more things follow from the same rule:
 Switching network or merchant clears the feed and the door-lookup memo. Otherwise
 the previous chain's rows would sum into one count and their explorer links would
 point at the wrong chain.
+
+### Finding the installed wallets
+
+With more than one wallet extension installed, "Connect wallet" used to open
+MetaMask for everyone, because the demo always connected `connectors[0]`. That is
+whatever extension claimed `window.ethereum` first, which makes the choice depend
+on install order rather than on what the user wants.
+
+Wallets are now collected from all three places they can show up:
+
+- **EIP-6963 announcements.** The modern path, handled by wagmi itself: each
+  wallet announces itself and wagmi gives it a connector. A wallet installed
+  later still appears, because wagmi keeps listening.
+- **`window.ethereum.providers`.** The legacy array, which nothing reads by
+  default. `lib/useLegacyWalletConnectors.ts` registers each provider that is not
+  already known, so an extension too old to announce is still reachable. They go
+  into the config's connector store rather than being connected through a
+  throwaway connector, because that store is what `reconnect` walks on page load.
+- **The catch-all connector.** Kept only as a fallback. With named wallets
+  present it is hidden, since it is not a separate wallet — it is one of them
+  under a generic label, and listing both would show the same wallet twice.
+
+Wallets that predate EIP-6963 identify themselves only through boolean flags, and
+several of them set `isMetaMask` too. Phantom and OKX both do, so brand detection
+has to test the specific flag before the generic one or both get reported as
+MetaMask.
 
 ### Hydration
 

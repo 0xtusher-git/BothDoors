@@ -46,10 +46,17 @@ function seedScript(): string {
   return `
     (() => {
       const ACCOUNT = ${JSON.stringify(ACCOUNT)};
-      const listeners = {};
       const calls = [];
       window.__mockCalls = calls;
+      // Which wallet the user approved, in localStorage because it has to survive
+      // the reload that the reconnect test does.
+      const APPROVED = "mock-approved";
+      const isApproved = (name) => { try { return localStorage.getItem(APPROVED) === name; } catch { return false; } };
+      const approve = (name) => { try { localStorage.setItem(APPROVED, name); } catch {} };
+
+      const makeWallet = (name, flags) => {
       let chainId = ${CHAIN_ID};
+      const listeners = {};
       const hex = (id) => "0x" + id.toString(16);
       // A wallet can be switched between networks. Firing chainChanged is what
       // wagmi actually listens for, so the app must react the way it would with
@@ -59,16 +66,19 @@ function seedScript(): string {
         for (const fn of listeners.chainChanged ?? []) fn(hex(id));
       };
       const provider = {
-        isMetaMask: true,
-        isConnected: () => true,
+        ...flags,
+        isConnected: () => isApproved(name),
         get chainId() { return hex(chainId); },
         selectedAddress: ACCOUNT,
         request: async ({ method, params }) => {
-          calls.push(method);
+          calls.push(name + ":" + method);
           switch (method) {
-            case "eth_accounts":
             case "eth_requestAccounts":
+              approve(name);
               return [ACCOUNT];
+            case "eth_accounts":
+              // Only the approved wallet reports an account, like a real one.
+              return isApproved(name) ? [ACCOUNT] : [];
             case "eth_chainId":
               return hex(chainId);
             case "net_version":
@@ -108,7 +118,36 @@ function seedScript(): string {
           listeners[event] = (listeners[event] || []).filter((f) => f !== fn);
         },
       };
-      Object.defineProperty(window, "ethereum", { value: provider, configurable: true });
+      return provider;
+      };
+
+      // Two wallets announce themselves over EIP-6963, the modern path.
+      const announcers = [
+        { info: { uuid: "mock-1", name: "MetaMask", rdns: "io.metamask" }, flags: { isMetaMask: true } },
+        // Phantom and OKX both set isMetaMask too, which is why brand detection has
+        // to check the specific flag first. Mocked so a regression there fails.
+        { info: { uuid: "mock-2", name: "OKX Wallet", rdns: "com.okex.wallet" }, flags: { isMetaMask: true, isOkxWallet: true } },
+      ];
+      const announced = announcers.map((a) => makeWallet(a.info.name, a.flags));
+      // The third never announces, the way an older extension behaves: it is only
+      // reachable through the legacy window.ethereum.providers array.
+      const legacy = makeWallet("Phantom", { isMetaMask: true, isPhantom: true });
+      const providers = [...announced, legacy];
+
+      // window.ethereum goes to the first announcement, as in a browser where the
+      // earliest-installed extension claimed it.
+      Object.defineProperty(window, "ethereum", { value: providers[0], configurable: true });
+      Object.defineProperty(providers[0], "providers", { value: providers, configurable: true });
+
+      window.addEventListener("eip6963:requestProvider", () => {
+        announcers.forEach(({ info }, index) => {
+          window.dispatchEvent(
+            new CustomEvent("eip6963:announceProvider", {
+              detail: { info: { ...info, icon: "" }, provider: announced[index] },
+            }),
+          );
+        });
+      });
     })();
   `;
 }
@@ -245,9 +284,38 @@ async function main() {
       `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /disconnect|Connect wallet|No wallet/.test(x.textContent)); return b ? b.textContent.trim() : null; })()`,
     ) as Promise<string | null>;
 
-  await evaluate(
-    `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /Connect wallet/.test(x.textContent)); if (b) b.click(); })()`,
+  const clickButton = (pattern: string) =>
+    evaluate(
+      `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => ${pattern}.test(x.textContent)); if (!b) return false; b.click(); return true; })()`,
+    ) as Promise<boolean>;
+
+  const dialogWallets = async () => {
+    const text = (await evaluate(
+      `(() => { const d = document.querySelector('[role="dialog"]'); return d ? d.innerText : null; })()`,
+    )) as string | null;
+    return text ?? "";
+  };
+
+  // Every installed wallet has to be offered, not just whichever extension won
+  // window.ethereum. This was the reported bug: OKX and Phantom were installed and
+  // unreachable.
+  await clickButton("/Connect wallet/");
+  await sleep(1500);
+  const offered = await dialogWallets();
+  check("phase 1: connect opens a wallet list", offered.length > 0, "no dialog appeared");
+  for (const wallet of ["MetaMask", "OKX Wallet", "Phantom"]) {
+    check(`phase 1: ${wallet} is offered`, offered.includes(wallet), offered.replace(/\s+/g, " ").slice(0, 160));
+  }
+  check(
+    "phase 1: the generic injected connector is not listed twice",
+    !/Injected/i.test(offered),
+    offered.replace(/\s+/g, " ").slice(0, 160),
   );
+
+  // Connect with OKX rather than the first entry, so the choice has to be honoured
+  // and not quietly replaced by MetaMask. Matched loosely because each row also
+  // carries an initial-letter avatar, so the text is "OOKX Wallet".
+  await clickButton("/OKX Wallet/");
   for (let i = 0; i < 20; i++) {
     await sleep(1000);
     if (/disconnect/.test((await walletButtonText()) ?? "")) break;
@@ -257,6 +325,10 @@ async function main() {
     /disconnect/.test((await walletButtonText()) ?? ""),
     await walletButtonText(),
   );
+  const okxWasUsed = ((await evaluate(`JSON.stringify(window.__mockCalls)`)) as string).includes(
+    "OKX Wallet:eth_requestAccounts",
+  );
+  check("phase 1: the chosen wallet is the one that was asked", okxWasUsed, "OKX was never prompted");
   const stored = await evaluate(`localStorage.getItem('wagmi.store')`);
   const hasAccounts = typeof stored === "string" && /"accounts":\s*\[\s*"0x/i.test(stored);
   check("phase 1: wagmi persisted a real account", hasAccounts, String(stored).slice(0, 120));

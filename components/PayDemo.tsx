@@ -14,6 +14,7 @@ import {
   useWalletClient,
 } from "wagmi";
 import { Badge, StatusCard, type DemoStatus, type Door } from "./StatusCard";
+import { WalletPicker } from "./WalletPicker";
 import {
   USDC_ERC20_ADDRESS,
   arcChains,
@@ -24,6 +25,8 @@ import {
 } from "@/lib/chain";
 import { DEFAULT_CHAIN_ID, MERCHANT_ADDRESS, MERCHANT_ADDRESS_INVALID } from "@/lib/env";
 import { formatDollars, formatUsdcFromErc20, formatUsdcFromNative, shortAddress } from "@/lib/format";
+import { useLegacyWalletConnectors } from "@/lib/useLegacyWalletConnectors";
+import { listWallets, type WalletOption } from "@/lib/wallets";
 import { useMounted } from "@/lib/useMounted";
 import { USDC_ERC20_ADDRESS as PAY_USDC, payNative, payToken, usdcAbi } from "@/lib/pay";
 import {
@@ -68,6 +71,9 @@ export function PayDemo() {
   const { disconnect } = useDisconnect();
   const { switchChainAsync, isPending: isSwitching } = useSwitchChain();
   const queryClient = useQueryClient();
+  useLegacyWalletConnectors();
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pendingWalletId, setPendingWalletId] = useState<string | null>(null);
 
   const [targetChainId, setTargetChainId] = useState<ArcChainId>(DEFAULT_CHAIN_ID);
   // `rows` is only what we render; `total` is how many payments we have actually
@@ -90,6 +96,12 @@ export function PayDemo() {
       if (isArcChainId(id)) setTargetChainId(id);
     }
   }, []);
+
+  // Once a wallet is through, the list has done its job. Left open it would sit
+  // above the app inviting the user to pick again.
+  useEffect(() => {
+    if (isConnected) setPickerOpen(false);
+  }, [isConnected]);
 
   // The toggle picks which Arc network the demo is on. If a wallet is connected
   // we also move it, so the badge and the wallet never disagree.
@@ -325,10 +337,13 @@ export function PayDemo() {
   const combinedUsdc = formatUsdcFromNative(combinedNativeUnits);
 
   // ---- actions -------------------------------------------------------------
-  const firstConnector = connectors[0];
+  // wagmi holds one connector per detected wallet. Offering only the first is what
+  // made "Connect wallet" open MetaMask for everyone, no matter what else was
+  // installed.
+  const wallets = listWallets(connectors);
   const blockingReason = getBlockingReason({
     isConnected,
-    hasConnector: Boolean(firstConnector),
+    hasConnector: wallets.length > 0,
     walletClient,
     walletOnArc,
     walletOnTarget,
@@ -336,6 +351,15 @@ export function PayDemo() {
     readChainName: readChain.name,
     walletChainName: chainNameOf(chainId),
   });
+
+  const handleSelectWallet = useCallback(
+    (wallet: WalletOption) => {
+      setPendingWalletId(wallet.id);
+      // Errors are reported by wagmi through connectError, which the picker shows.
+      connect({ connector: wallet.connector });
+    },
+    [connect],
+  );
   // Once paid, the session is over: the buttons stay disabled until Reset demo.
   const canPay = blockingReason === null && !qualifying;
 
@@ -421,10 +445,10 @@ export function PayDemo() {
                     >
                       {shortAddress(address, 8, 6)} · disconnect
                     </button>
-                  ) : firstConnector ? (
+                  ) : wallets.length > 0 ? (
                     <button
                       type="button"
-                      onClick={() => connect({ connector: firstConnector })}
+                      onClick={() => setPickerOpen(true)}
                       disabled={isConnecting}
                       className="rounded-lg border border-door-accent/50 bg-door-accent/10 px-3 py-1.5 text-sm font-semibold text-door-accent transition hover:bg-door-accent/20 disabled:opacity-50"
                     >
@@ -491,29 +515,28 @@ export function PayDemo() {
               </button>
             ) : null}
 
-            {!isConnected && firstConnector ? (
+            {!isConnected && wallets.length > 0 ? (
               <button
                 type="button"
-                onClick={() => connect({ connector: firstConnector })}
+                onClick={() => setPickerOpen(true)}
                 disabled={isConnecting}
                 className="btn-quiet mt-4 !py-2.5 !text-sm"
               >
-                {isConnecting ? "Connecting…" : `Connect ${firstConnector.name}`}
+                {isConnecting ? "Connecting…" : "Connect wallet"}
               </button>
             ) : null}
 
-            {!isConnected && !firstConnector ? (
+            {!isConnected && wallets.length === 0 ? (
               <p className="mt-4 text-xs text-door-wait">
                 No browser wallet found. Install one, or set NEXT_PUBLIC_MERCHANT_ADDRESS so the demo
                 has a merchant without a wallet.
               </p>
             ) : null}
 
-            {connectError ? (
+            {connectError && !pickerOpen ? (
               <p className="mt-3 text-xs text-door-wait">{plainError(connectError)}</p>
             ) : null}
           </div>
-
           <div className="panel p-5">
             <div className="flex items-center justify-between gap-3">
               <p className="label">Merchant address</p>
@@ -731,6 +754,15 @@ export function PayDemo() {
           </div>
         </div>
       </div>
+
+      <WalletPicker
+        open={pickerOpen}
+        wallets={wallets}
+        pendingId={pendingWalletId}
+        error={connectError ? plainError(connectError) : null}
+        onSelect={handleSelectWallet}
+        onClose={() => setPickerOpen(false)}
+      />
     </div>
   );
 }
