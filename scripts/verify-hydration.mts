@@ -48,6 +48,12 @@ function seedScript(): string {
       const ACCOUNT = ${JSON.stringify(ACCOUNT)};
       const calls = [];
       window.__mockCalls = calls;
+      // Every transaction the app asks a wallet to sign, with its parameters.
+      // Asserting only that "a click happened" cannot tell a real $1 native send
+      // from one that sent nothing, sent to the wrong place, or sent calldata
+      // while the button claimed to be the native door.
+      const txs = [];
+      window.__mockTxs = txs;
       // Which wallet the user approved, in localStorage because it has to survive
       // the reload that the reconnect test does.
       const APPROVED = "mock-approved";
@@ -92,6 +98,7 @@ function seedScript(): string {
             case "eth_sendTransaction":
               // The app only needs a hash back; no log will ever arrive for it,
               // which is exactly the state the network-switch test needs.
+              txs.push({ wallet: name, params: params && params[0] ? params[0] : null });
               return ${JSON.stringify(FAKE_TX_HASH)};
             case "eth_getTransactionCount":
               return "0x7";
@@ -462,6 +469,57 @@ async function main() {
     "phase 3: no warning tells the user to switch to the chain they are on",
     !/is on (Arc Testnet|Arc)[^.]*pointed at \1/.test(await bodyText()),
     "self-contradictory network message",
+  );
+
+  // The native door. Nothing about what it sends was covered before: the token
+  // phase only proved a button was clickable, so a native send that sent no
+  // value, sent it to the wrong address, or sent calldata while advertising the
+  // system-emitter path would have passed every test in the suite.
+  const sentTxs = async (): Promise<any[]> =>
+    JSON.parse(((await evaluate("JSON.stringify(window.__mockTxs || [])")) as string) || "[]");
+
+  const before = (await sentTxs()).length;
+  const nativeClick = await clickPay(/Pay \$1 as native/);
+  check("phase 4: native pay button is clickable", nativeClick === "clicked", nativeClick);
+
+  for (let i = 0; i < 12 && !(await waitingFor()); i++) await sleep(1000);
+  check("phase 4: the native door waits for its payment", await waitingFor(), (await bodyText()).replace(/\s+/g, " ").slice(0, 160));
+
+  const sent = (await sentTxs()).slice(before);
+  check("phase 4: the native door asks the wallet for one transaction", sent.length === 1, `sent ${sent.length}`);
+
+  const tx = sent[0]?.params ?? null;
+  check("phase 4: it sends value, not a contract call", tx !== null && !tx.data, tx ? `data=${tx.data}` : "no transaction");
+  check(
+    "phase 4: it sends exactly $1 of native USDC",
+    tx !== null && BigInt(tx.value ?? "0x0") === 10n ** 18n,
+    tx ? `value=${tx.value} (${BigInt(tx.value ?? "0x0")})` : "no transaction",
+  );
+  check(
+    "phase 4: it pays the merchant address shown on the page",
+    typeof tx?.to === "string" && tx.to.toLowerCase() === ACCOUNT.toLowerCase(),
+    tx ? `to=${tx.to} expected=${ACCOUNT}` : "no transaction",
+  );
+
+  // A hash with no log behind it must not turn into a payment row. This is the
+  // "fake data" shape: the wallet reported a transaction, so the UI is free to
+  // link it for tracking, but nothing on chain has happened yet and the door
+  // must stay shut.
+  const bodyAfterNative = (await bodyText()).replace(/\s+/g, " ");
+  check(
+    "phase 4: an unmined transaction never shows as a payment",
+    !/Paid\b/.test(bodyAfterNative),
+    bodyAfterNative.slice(0, 160),
+  );
+  check(
+    "phase 4: it still waits rather than claiming the door is open",
+    await waitingFor(),
+    bodyAfterNative.slice(0, 160),
+  );
+  check(
+    "phase 4: the pending native tx is traceable while it waits",
+    (await explorerHrefs()).includes(FAKE_TX_HASH),
+    await explorerHrefs(),
   );
 
   console.log(`\n${failures === 0 ? "Hydration test passed." : `${failures} hydration check(s) failed.`}`);
