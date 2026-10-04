@@ -92,8 +92,6 @@ export function mergeFeed(
   minNativeValue: bigint,
   sinceBlock: bigint = 0n,
 ): Feed {
-  if (events.length === 0) return prev;
-
   const known = new Set(prev.seen);
   const fresh: Row[] = [];
   for (const event of events) {
@@ -101,9 +99,22 @@ export function mergeFeed(
     known.add(event.txHash);
     fresh.push({ ...event, door: doorFor(event) });
   }
-  if (fresh.length === 0) return prev;
+  // The inherited payment has to be re-checked, not just the fresh ones. A
+  // qualifying payment is sticky once it lands, which is what keeps a reload from
+  // dropping the proof of a payment you just made. But the session boundary moves
+  // forward every time a new attempt starts, and a payment that predates it is no
+  // longer this session's proof: without this, a shop could sit PAID forever
+  // citing the block and hash of a payment from days ago.
+  let qualifying =
+    prev.qualifying !== null && prev.qualifying.blockNumber >= sinceBlock ? prev.qualifying : null;
 
-  let qualifying = prev.qualifying;
+  // This has to run before the "nothing new" bail-out below. Re-arming the
+  // session is exactly the case where there are no new rows but the inherited
+  // payment has still gone stale.
+  if (fresh.length === 0) {
+    return qualifying === prev.qualifying ? prev : { ...prev, qualifying };
+  }
+
   for (const row of fresh) {
     if (row.nativeValue < minNativeValue) continue;
     if (row.blockNumber < sinceBlock) continue;

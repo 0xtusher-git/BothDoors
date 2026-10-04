@@ -54,6 +54,10 @@ function seedScript(): string {
       // while the button claimed to be the native door.
       const txs = [];
       window.__mockTxs = txs;
+      // Set by the cancellation phase: the wallet prompt opens and the user backs
+      // out, which is the most common thing that happens and the one this harness
+      // had no coverage for at all.
+      window.__mockRejectSend = false;
       // Which wallet the user approved, in localStorage because it has to survive
       // the reload that the reconnect test does.
       const APPROVED = "mock-approved";
@@ -98,6 +102,11 @@ function seedScript(): string {
             case "eth_sendTransaction":
               // The app only needs a hash back; no log will ever arrive for it,
               // which is exactly the state the network-switch test needs.
+              if (window.__mockRejectSend) {
+                const e = new Error("User rejected the request.");
+                e.code = 4001;
+                throw e;
+              }
               txs.push({ wallet: name, params: params && params[0] ? params[0] : null });
               return ${JSON.stringify(FAKE_TX_HASH)};
             case "eth_getTransactionCount":
@@ -521,6 +530,35 @@ async function main() {
     (await explorerHrefs()).includes(FAKE_TX_HASH),
     await explorerHrefs(),
   );
+
+  // Cancelling the wallet prompt. Reported as: cancel the confirmation, and the
+  // app says Paid citing an old transaction. The button has to survive a cancelled
+  // attempt, and nothing may claim the door is open.
+  await evaluate("window.__mockRejectSend = true");
+  const cancelClick = await clickPay(/Pay \$1 as native/);
+  check("phase 5: the native door can be tried again", cancelClick === "clicked", cancelClick);
+
+  let rejected = false;
+  for (let i = 0; i < 15 && !rejected; i++) {
+    await sleep(1000);
+    rejected = /reject|denied|cancel|declin/i.test(await bodyText());
+  }
+  const afterCancel = (await bodyText()).replace(/\s+/g, " ");
+  check("phase 5: cancelling is reported honestly", rejected, afterCancel.slice(0, 160));
+  check(
+    "phase 5: cancelling does not claim the door is paid",
+    !/Paid\b/.test(afterCancel),
+    afterCancel.slice(0, 160),
+  );
+  check(
+    "phase 5: cancelling does not leave a transaction link behind",
+    !(await explorerHrefs()).includes(FAKE_TX_HASH),
+    await explorerHrefs(),
+  );
+  const retryable = (await evaluate(
+    `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /Pay \\$1 as native/.test(x.textContent)); return b ? !b.disabled : null; })()`,
+  )) as boolean | null;
+  check("phase 5: the native button is usable again after a cancel", retryable === true, `disabled=${retryable}`);
 
   console.log(`\n${failures === 0 ? "Hydration test passed." : `${failures} hydration check(s) failed.`}`);
   ws.close();

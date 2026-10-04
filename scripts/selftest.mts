@@ -865,6 +865,21 @@ const freshPayment = decodeTransferLog(
 );
 if (oldPayment === null || freshPayment === null) throw new Error("test setup failed to decode");
 
+// A payment made *after* the boundary is re-armed. A distinct tx hash matters:
+// re-reporting one already in the feed is deduped, which would make the check pass
+// for the wrong reason.
+const afterReArm = decodeTransferLog(
+  systemTransfer({
+    from: PAYER_A,
+    to: MERCHANT,
+    value: 10n ** 18n,
+    blockNumber: 1100n,
+    txHash: "0x115e7100" as Hex,
+  }),
+  { merchant: MERCHANT },
+);
+if (afterReArm === null) throw new Error("test setup failed to decode the post-re-arm payment");
+
 const sessionStart = 800n;
 const withOldHistory = mergeFeed(EMPTY_FEED, [oldPayment], 20, 10n ** 18n, sessionStart);
 check(
@@ -898,6 +913,55 @@ check(
   "an old payment on its own leaves the shop unpaid even with a stale feed",
   mergeFeed(withOldHistory, [oldPayment], 20, 10n ** 18n, sessionStart).qualifying === null,
   "qualifying reappeared",
+);
+
+// Starting a new attempt moves the boundary forward. An already-set qualifying
+// payment is sticky so a reload keeps the proof of a payment you just made, but
+// once the boundary passes it, that payment is no longer this session's and must
+// be dropped even with no new rows to trigger the merge.
+const paidEarlier = mergeFeed(EMPTY_FEED, [freshPayment], 20, 10n ** 18n, sessionStart);
+check(
+  "a payment made in this session keeps the shop paid",
+  paidEarlier.qualifying?.txHash === freshPayment.txHash,
+  "the payment was lost immediately",
+);
+check(
+  "re-arming the session clears a qualifying payment from an earlier visit",
+  mergeFeed(paidEarlier, [], 20, 10n ** 18n, 1000n).qualifying === null,
+  "the old payment still held the door open",
+);
+check(
+  "the rows stay on screen after re-arming, only the door re-locks",
+  mergeFeed(paidEarlier, [], 20, 10n ** 18n, 1000n).rows.length === paidEarlier.rows.length,
+  "history was thrown away instead of demoted",
+);
+// The case that must NOT regress: reload straight after paying.
+check(
+  "a reload after paying keeps the shop paid",
+  mergeFeed(paidEarlier, [], 20, 10n ** 18n, sessionStart).qualifying?.txHash === freshPayment.txHash,
+  "a reload dropped a payment that had just been made",
+);
+check(
+  "a payment newer than a re-armed boundary still opens the door",
+  mergeFeed(
+    mergeFeed(paidEarlier, [], 20, 10n ** 18n, 1000n),
+    [afterReArm!],
+    20,
+    10n ** 18n,
+    1000n,
+  ).qualifying?.txHash === afterReArm.txHash,
+  "the payment made after the re-arm was ignored",
+);
+check(
+  "the re-armed attempt does not have to wait for a reload to pay",
+  mergeFeed(
+    mergeFeed(paidEarlier, [], 20, 10n ** 18n, 1000n),
+    [afterReArm!],
+    20,
+    10n ** 18n,
+    1000n,
+  ).qualifying !== null,
+  "a live payment after a re-arm never opened the door",
 );
 
 console.log(`\n${failures === 0 ? "All checks passed." : `${failures} check(s) failed.`}`);

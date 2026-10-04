@@ -380,11 +380,38 @@ export function PayDemo() {
   // Once paid, the session is over: the buttons stay disabled until Reset demo.
   const canPay = blockingReason === null && !qualifying;
 
+  // Re-arm the session at the current head. A stored marker that never moves is
+  // what let a payment from a previous visit stay "newer than this session"
+  // forever: the shop would read PAID citing that old block and hash, and since
+  // `canPay` needs no qualifying payment, both pay buttons stayed dead. Pressing
+  // pay is the user saying "count from now", so the boundary moves to now, and a
+  // cancelled attempt then genuinely leaves the shop unpaid.
+  const armSession = useCallback(async () => {
+    if (!publicClient || !merchant) return;
+    let head: bigint | undefined;
+    try {
+      head = await publicClient.getBlockNumber();
+    } catch {
+      head = undefined;
+    }
+    const start = head ?? sessionStartRef.current;
+    if (head !== undefined) {
+      writeSessionStart(sessionKey(merchant, readChainIdRef.current), head);
+      sessionStartRef.current = head;
+    }
+    // Merge with no new rows: this exists purely to re-check the inherited
+    // qualifying payment against the boundary that just moved.
+    setFeed((prev) => mergeFeed(prev, [], MAX_ROWS, PRICE_NATIVE, start));
+  }, [publicClient, merchant]);
+
   const handlePay = useCallback(
     async (door: "token" | "native") => {
       if (!walletClient || !merchant) return;
       const paidOnChain = readChainIdRef.current;
       setError(null);
+      // Before the wallet opens, so a cancellation has already dropped any
+      // payment left over from an earlier visit.
+      await armSession();
       setSending(door);
       setAwaiting({ door, txHash: null });
       try {
@@ -410,7 +437,7 @@ export function PayDemo() {
         setSending(null);
       }
     },
-    [walletClient, merchant, readChain, queryClient],
+    [walletClient, merchant, readChain, queryClient, armSession],
   );
 
   const handleCopy = useCallback(async () => {

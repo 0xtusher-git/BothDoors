@@ -1,16 +1,20 @@
 /**
- * Where this demo session began, per merchant and chain.
+ * Where this demo's last payment attempt began, per merchant and chain.
  *
- * "Paid" has to mean paid *since the demo was opened*. History is read over a
- * 5000-block lookback on purpose, so a merchant that was paid last week always
- * has rows on screen — and treating one of those as this session's payment marked
- * the shop PAID the instant it loaded. That also disabled both pay buttons, so
- * pressing one did nothing at all, which read as a fake PAID.
+ * "Paid" has to mean paid *since the last attempt*, not "has ever been paid".
+ * History is read over a 5000-block lookback on purpose, so a merchant that was
+ * paid last week always has rows on screen — and treating one of those as this
+ * session's payment marked the shop PAID the instant it loaded. That also disabled
+ * both pay buttons, so pressing one did nothing at all, which read as a fake PAID.
  *
- * The block is stored rather than kept in memory so a reload does not lose a
- * payment you just made: the marker stays where it was, the payment is still
- * newer than it, and the shop is still PAID. "Reset demo" clears it and re-arms
- * at the current head, which is the only way to un-stick the buttons.
+ * The marker moves forward every time the user presses pay, because pressing pay
+ * means "count from now". That is what makes a cancelled attempt leave the shop
+ * unpaid, and what stops a payment from a previous visit holding the door open
+ * forever while its stale block and hash are quoted as the proof.
+ *
+ * It is stored rather than kept in memory so a reload does not lose a payment you
+ * just made: the marker stays where the attempt put it, the payment is still newer
+ * than it, and the shop is still PAID. "Reset demo" clears it for a clean slate.
  */
 const KEY_PREFIX = "bothdoors.session.";
 

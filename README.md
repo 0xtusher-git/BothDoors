@@ -142,9 +142,10 @@ for the native door. Same `$1`, two decimal bases.
 | 11 | Every installed wallet is offered, not just the first | `npm test` "wallet discovery" - the catch-all injected connector is hidden when named wallets exist so one wallet cannot appear twice, and brand detection asserts Phantom and OKX are not misread as MetaMask; `verify:hydration` installs three mock wallets and asserts all three are listed and that picking one is honoured |
 | 12 | A payment from history cannot fake a PAID | `npm test` "Session boundary" - a real earlier $1 payment is still listed but does not open the door, so the shop cannot read PAID before the user has pressed anything. Reproduced live against an Arc testnet merchant: without the fix its history set `qualifying` and both pay buttons were disabled |
 | 13 | The native door sends a real $1 native transfer | `npm run verify:hydration` phase 4 - the mock wallet now records the transaction the app asks it to sign, and asserts it carries `value` of exactly 1e18, no calldata, and the merchant address on screen. It also asserts an unmined hash never becomes a payment row. Previously the token phase only proved a button was clickable, so a native send that sent no value, sent it elsewhere, or sent a contract call while advertising the emitter path passed every test |
+| 14 | Cancelling a payment cannot leave the shop PAID | `npm run verify:hydration` phase 5 makes the mock wallet reject `eth_sendTransaction` the way a user backing out of the prompt does, then asserts the refusal is surfaced, no PAID appears, no transaction link is left behind, and the button is usable again. `npm test` "Session boundary" covers the deeper case: a qualifying payment from an earlier visit stops holding the door open once the boundary moves past it |
 
 ```bash
-npm test                 # 105 checks, synthetic chain, no network needed
+npm test                 # 111 checks, synthetic chain, no network needed
 npm run typecheck        # tsc --noEmit, strict
 npm run build            # production build
 
@@ -237,11 +238,24 @@ pressing one did nothing at all and looked like a fake PAID arriving a couple of
 seconds later.
 
 Rows from history are still shown and still counted. Only `qualifying`, the payment
-that opens the door, respects a session boundary: the block the session started
-at, held in `localStorage` per merchant and chain. Storing it means a reload
-straight after paying keeps the proof, since the payment is still newer than the
-marker. "Reset demo" clears the marker and re-arms at the current head, which is
-the only thing that un-sticks the buttons.
+that opens the door, respects a session boundary: the block the last payment
+attempt started at, held in `localStorage` per merchant and chain.
+
+Two rules make that boundary behave:
+
+- **Pressing pay moves it.** Starting an attempt re-arms the session at the current
+  head, so a payment left over from a previous visit stops counting the moment you
+  try again. Cancelling that attempt therefore leaves the shop unpaid, which is what
+  it should be — and the button stays usable.
+- **A reload does not move it.** The marker stays where it was, so a payment you
+  just made is still newer than it and the shop is still PAID after a refresh.
+
+`mergeFeed` re-checks the inherited qualifying payment against the boundary on
+every merge, including merges with no new rows. Without that a qualifying payment
+is sticky forever: the shop reads PAID citing the block and hash of a payment from
+days ago, and because `canPay` requires no qualifying payment, both buttons stay
+disabled with no way out. "Reset demo" clears the marker entirely for a clean
+slate.
 
 ### Hydration
 
