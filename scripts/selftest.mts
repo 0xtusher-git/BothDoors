@@ -835,5 +835,70 @@ check(
   "a non-provider was accepted",
 );
 
+// --- a payment from history must not open the door --------------------------
+// The reported bug: the shop showed PAID ~2s after pressing "Pay $1 as native",
+// with no transaction ever made. Nothing was fabricated — the 5000-block
+// history read found a real earlier $1 payment and merged it through the same
+// path the poller uses, so the door opened before the user pressed anything and
+// both pay buttons (which are disabled once paid) silently did nothing.
+console.log("\nSession boundary - old payments are history, not this session");
+
+const oldPayment = decodeTransferLog(
+  systemTransfer({
+    from: PAYER_B,
+    to: MERCHANT,
+    value: 10n ** 18n,
+    blockNumber: 500n,
+    txHash: "0x0d5e7100" as Hex,
+  }),
+  { merchant: MERCHANT },
+);
+const freshPayment = decodeTransferLog(
+  systemTransfer({
+    from: PAYER_B,
+    to: MERCHANT,
+    value: 10n ** 18n,
+    blockNumber: 900n,
+    txHash: "0x0f5e7100" as Hex,
+  }),
+  { merchant: MERCHANT },
+);
+if (oldPayment === null || freshPayment === null) throw new Error("test setup failed to decode");
+
+const sessionStart = 800n;
+const withOldHistory = mergeFeed(EMPTY_FEED, [oldPayment], 20, 10n ** 18n, sessionStart);
+check(
+  "an old payment is still shown",
+  withOldHistory.rows.length === 1 && withOldHistory.total === 1,
+  withOldHistory.rows.length,
+);
+check(
+  "an old payment does NOT mark the shop paid",
+  withOldHistory.qualifying === null,
+  withOldHistory.qualifying?.txHash,
+);
+check(
+  "a payment from this session does mark it paid",
+  mergeFeed(EMPTY_FEED, [freshPayment], 20, 10n ** 18n, sessionStart).qualifying?.txHash ===
+    freshPayment.txHash,
+  "session payment ignored",
+);
+check(
+  "history arriving after a session payment cannot steal the door",
+  mergeFeed(
+    mergeFeed(EMPTY_FEED, [freshPayment], 20, 10n ** 18n, sessionStart),
+    [oldPayment],
+    20,
+    10n ** 18n,
+    sessionStart,
+  ).qualifying?.txHash === freshPayment.txHash,
+  "an old payment took over as qualifying",
+);
+check(
+  "an old payment on its own leaves the shop unpaid even with a stale feed",
+  mergeFeed(withOldHistory, [oldPayment], 20, 10n ** 18n, sessionStart).qualifying === null,
+  "qualifying reappeared",
+);
+
 console.log(`\n${failures === 0 ? "All checks passed." : `${failures} check(s) failed.`}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -25,6 +25,7 @@ import {
 } from "@/lib/chain";
 import { DEFAULT_CHAIN_ID, MERCHANT_ADDRESS, MERCHANT_ADDRESS_INVALID } from "@/lib/env";
 import { formatDollars, formatUsdcFromErc20, formatUsdcFromNative, shortAddress } from "@/lib/format";
+import { clearSessionStart, readSessionStart, sessionKey, writeSessionStart } from "@/lib/session";
 import { useLegacyWalletConnectors } from "@/lib/useLegacyWalletConnectors";
 import { listWallets, type WalletOption } from "@/lib/wallets";
 import { useMounted } from "@/lib/useMounted";
@@ -164,7 +165,9 @@ export function PayDemo() {
    */
   const addRows = useCallback((events: readonly PaidEvent[]) => {
     if (events.length === 0) return;
-    setFeed((prev) => mergeFeed(prev, events, MAX_ROWS, PRICE_NATIVE));
+    setFeed((prev) =>
+      mergeFeed(prev, events, MAX_ROWS, PRICE_NATIVE, sessionStartRef.current),
+    );
   }, []);
 
   // Switching network or merchant must not leave the previous one's rows on
@@ -196,6 +199,11 @@ export function PayDemo() {
   const readChainIdRef = useRef(readChainId);
   readChainIdRef.current = readChainId;
 
+  // The block before which a payment is history rather than this session's. Read
+  // through a ref because `addRows` has to stay stable while the watcher effect
+  // owns setting it.
+  const sessionStartRef = useRef(0n);
+
   useEffect(() => {
     if (!publicClient || !merchant) {
       setFeed(EMPTY_FEED);
@@ -215,6 +223,15 @@ export function PayDemo() {
       } catch {
         fromBlock = undefined;
       }
+
+      // Establish where this session begins, before the history read lands. A
+      // session already in progress keeps its original block so that a reload
+      // straight after paying does not drop the proof.
+      const session = sessionKey(merchant, readChainId);
+      const storedStart = readSessionStart(session);
+      const sessionStart = storedStart ?? fromBlock ?? 0n;
+      if (storedStart === null) writeSessionStart(session, sessionStart);
+      sessionStartRef.current = sessionStart;
 
       try {
         const result = await fetchRecentPayments({
@@ -413,10 +430,17 @@ export function PayDemo() {
     setError(null);
     setHistoryNote(null);
     // The library's `seen` set is deliberately NOT cleared. The payments above
-    // stay claimed, so this reset does not immediately re-trip PAID from history
-    // and a brand new payment is the only thing that can light the shop up again.
+    // stay claimed, so this reset does not immediately re-report them.
+    //
+    // Clearing the session marker is what actually re-arms the shop. Leaving it
+    // would re-arm at the block this session started on, and the history read
+    // that follows would find those same payments still newer than it — PAID
+    // again before the user had pressed anything. Re-arming means the next
+    // session starts at the current head, so only a brand new payment can light
+    // the shop up.
+    if (merchant) clearSessionStart(sessionKey(merchant, readChainId));
     setResetToken((n) => n + 1);
-  }, []);
+  }, [merchant, readChainId]);
 
   return (
     <div className="space-y-6">

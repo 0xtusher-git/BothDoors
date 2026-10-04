@@ -140,9 +140,10 @@ for the native door. Same `$1`, two decimal bases.
 | 9 | An abandoned history read cannot swallow a payment | `npm test` "Recovery" — a read whose result is discarded leaves the payment still owed, and only a committed read stops re-reporting it |
 | 10 | A rate-limited node does not cost us history | `npm test` "Acceptance test 3e" — a throttled chunk is re-asked at the identical range rather than narrowed, the throttled run requests exactly the ranges an unthrottled one does, and no block of the lookback is left unasked |
 | 11 | Every installed wallet is offered, not just the first | `npm test` "wallet discovery" - the catch-all injected connector is hidden when named wallets exist so one wallet cannot appear twice, and brand detection asserts Phantom and OKX are not misread as MetaMask; `verify:hydration` installs three mock wallets and asserts all three are listed and that picking one is honoured |
+| 12 | A payment from history cannot fake a PAID | `npm test` "Session boundary" - a real earlier $1 payment is still listed but does not open the door, so the shop cannot read PAID before the user has pressed anything. Reproduced live against an Arc testnet merchant: without the fix its history set `qualifying` and both pay buttons were disabled |
 
 ```bash
-npm test                 # 100 checks, synthetic chain, no network needed
+npm test                 # 105 checks, synthetic chain, no network needed
 npm run typecheck        # tsc --noEmit, strict
 npm run build            # production build
 
@@ -224,6 +225,22 @@ Wallets that predate EIP-6963 identify themselves only through boolean flags, an
 several of them set `isMetaMask` too. Phantom and OKX both do, so brand detection
 has to test the specific flag before the generic one or both get reported as
 MetaMask.
+
+### What counts as paid
+
+`PAID` means paid *since this demo was opened*, not "has ever been paid". History
+is read over a 5000-block lookback deliberately, so a merchant that was paid last
+week always has rows on screen — and treating one of those as this session's
+payment marked the shop paid on load. That also disabled both pay buttons, so
+pressing one did nothing at all and looked like a fake PAID arriving a couple of
+seconds later.
+
+Rows from history are still shown and still counted. Only `qualifying`, the payment
+that opens the door, respects a session boundary: the block the session started
+at, held in `localStorage` per merchant and chain. Storing it means a reload
+straight after paying keeps the proof, since the payment is still newer than the
+marker. "Reset demo" clears the marker and re-arms at the current head, which is
+the only thing that un-sticks the buttons.
 
 ### Hydration
 

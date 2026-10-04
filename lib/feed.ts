@@ -78,12 +78,19 @@ function isNewer(a: Row, b: Row): boolean {
  * `total` counts everything ever merged, while `rows` keeps only the newest
  * `maxRows` for display — so the UI can say "34 found · showing latest 20"
  * instead of implying 20 was the whole truth.
+ *
+ * `sinceBlock` is the only thing allowed to open the door. History is real and
+ * belongs on screen, but a payment from last week is not this session's payment:
+ * counting it marked the shop PAID before the user had pressed anything, which
+ * also disabled both pay buttons — so the demo looked paid and refused to run.
+ * Rows are still added and counted; only `qualifying` respects the boundary.
  */
 export function mergeFeed(
   prev: Feed,
   events: readonly PaidEvent[],
   maxRows: number,
   minNativeValue: bigint,
+  sinceBlock: bigint = 0n,
 ): Feed {
   if (events.length === 0) return prev;
 
@@ -99,6 +106,7 @@ export function mergeFeed(
   let qualifying = prev.qualifying;
   for (const row of fresh) {
     if (row.nativeValue < minNativeValue) continue;
+    if (row.blockNumber < sinceBlock) continue;
     if (qualifying === null || isNewer(row, qualifying)) qualifying = row;
   }
 
