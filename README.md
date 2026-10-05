@@ -143,9 +143,10 @@ for the native door. Same `$1`, two decimal bases.
 | 12 | A payment from history cannot fake a PAID | `npm test` "Session boundary" - a real earlier $1 payment is still listed but does not open the door, so the shop cannot read PAID before the user has pressed anything. Reproduced live against an Arc testnet merchant: without the fix its history set `qualifying` and both pay buttons were disabled |
 | 13 | The native door sends a real $1 native transfer | `npm run verify:hydration` phase 4 - the mock wallet now records the transaction the app asks it to sign, and asserts it carries `value` of exactly 1e18, no calldata, and the merchant address on screen. It also asserts an unmined hash never becomes a payment row. Previously the token phase only proved a button was clickable, so a native send that sent no value, sent it elsewhere, or sent a contract call while advertising the emitter path passed every test |
 | 14 | Cancelling a payment cannot leave the shop PAID | `npm run verify:hydration` phase 5 makes the mock wallet reject `eth_sendTransaction` the way a user backing out of the prompt does, then asserts the refusal is surfaced, no PAID appears, no transaction link is left behind, and the button is usable again. `npm test` "Session boundary" covers the deeper case: a qualifying payment from an earlier visit stops holding the door open once the boundary moves past it |
+| 15 | A native payment is confirmed from the transaction, not just from the emitter log | `npm test` "Native door" - Arc does not emit a system-emitter log when native currency is sent to yourself (0 self-sends in 74,522 emitter Transfers over 6000 blocks on both chains), and with no `NEXT_PUBLIC_MERCHANT_ADDRESS` set this demo pays the connected wallet, so the native door was unconfirmable and waited forever. The receipt of the transaction the app sent is now polled directly. Checks that a self-send is recognised, a reverted or zero-value send is not, and a payment that was mirrored is still counted exactly once |
 
 ```bash
-npm test                 # 111 checks, synthetic chain, no network needed
+npm test                 # 124 checks, synthetic chain, no network needed
 npm run typecheck        # tsc --noEmit, strict
 npm run build            # production build
 
@@ -228,6 +229,24 @@ several of them set `isMetaMask` too. Phantom and OKX both do, so brand detectio
 has to test the specific flag before the generic one or both get reported as
 MetaMask.
 
+### Confirming a native payment
+
+Arc's EIP-7708 system emitter is what makes the native door observable at all: a
+plain `sendTransaction` writes no contract log of its own. But the mirror is not
+guaranteed. Sending native currency **to yourself emits nothing** - measured, 0
+self-sends across 74,522 emitter Transfers on both chains - and with no
+`NEXT_PUBLIC_MERCHANT_ADDRESS` set this demo pays the connected wallet, so that is
+exactly what "Pay $1 as native" does when one person runs the demo alone. The
+payment lands, the emitter never announces it, and the status waits forever.
+
+So the native door also watches the transaction it just sent. Once mined, a
+transaction's recipient and value say what happened, and the app asks the chain
+directly instead of waiting to be told. A reverted or zero-value send is not a
+payment, and because the feed dedupes by transaction hash, a payment that *was*
+mirrored is still counted exactly once.
+
+The token door needs none of this: an ERC-20 transfer to yourself still emits a log
+from the USDC contract.
 ### What counts as paid
 
 `PAID` means paid *since this demo was opened*, not "has ever been paid". History

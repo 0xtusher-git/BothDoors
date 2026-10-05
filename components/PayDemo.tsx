@@ -35,6 +35,7 @@ import {
   fetchRecentPayments,
   inferPaymentSource,
   markPaymentsSeen,
+  watchNativePayment,
   watchUsdcPayments,
   type PaidEvent,
   type UsdcReceiptClient,
@@ -156,6 +157,17 @@ export function PayDemo() {
   // One receipt lookup per tx, ever. inferPaymentSource() answers "unknown" when
   // the node refuses, and retrying that forever would hammer the RPC.
   const attemptedDoors = useRef<Set<string>>(new Set());
+
+  // Receipt watchers for native transactions this page sent, so they can be
+  // stopped when the component goes away or the merchant/chain changes under them.
+  const nativeWatchers = useRef<(() => void)[]>([]);
+  useEffect(
+    () => () => {
+      for (const stop of nativeWatchers.current) stop();
+      nativeWatchers.current = [];
+    },
+    [],
+  );
 
   /**
    * Add payments to the feed, ignoring any tx we already hold.
@@ -429,6 +441,27 @@ export function PayDemo() {
         setAwaiting((current) => (current ? { ...current, txHash: hash } : current));
         // Balances move; refresh them once the receipt is in.
         void queryClient.invalidateQueries();
+
+        // The native door cannot rely on the system emitter. Arc mirrors a plain
+        // value transfer into an emitter log, but not when you pay yourself, and
+        // with no merchant address configured this demo pays the connected wallet.
+        // So watch the transaction we just sent: once mined, its recipient and
+        // value say what happened. Deduped by hash, so a payment that *was*
+        // mirrored is still counted once.
+        if (door === "native") {
+          nativeWatchers.current.push(
+            watchNativePayment({
+              publicClient: receiptClient ?? publicClient,
+              txHash: hash,
+              merchant,
+              allowSelfTransfer: isDemoSelfPay,
+              onPaid: (event) => {
+                if (readChainIdRef.current !== paidOnChain) return;
+                addRows([event]);
+              },
+            }),
+          );
+        }
       } catch (cause) {
         if (readChainIdRef.current !== paidOnChain) return;
         setAwaiting(null);

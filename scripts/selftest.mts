@@ -21,6 +21,8 @@ import {
   inferPaymentSource,
   markPaymentsSeen,
   nativeValueToUsdc,
+  nativePaymentFromReceipt,
+  watchNativePayment,
   watchUsdcPayments,
   type PaidEvent,
   type TransferLogLike,
@@ -963,6 +965,139 @@ check(
   ).qualifying !== null,
   "a live payment after a re-arm never opened the door",
 );
+
+console.log("\nNative door - the transaction itself, not just the emitter log");
+
+// Arc mirrors a value transfer into the system emitter, but not when you pay
+// yourself: verified against both Arc RPCs, 0 self-sends in 74522 emitter
+// Transfers over 6000 blocks each. With no NEXT_PUBLIC_MERCHANT_ADDRESS set this
+// demo pays the connected wallet, so "Pay $1 as native" is always a self-send and
+// the emitter never announces it. These check the receipt path that covers it.
+const selfSend = nativePaymentFromReceipt(
+  { transactionHash: "0x5e1f0001" as Hex, from: MERCHANT, to: MERCHANT, value: 10n ** 18n, blockNumber: 4242n, status: "success" },
+  { merchant: MERCHANT, allowSelfTransfer: true },
+);
+check("a native self-send is recognised from its receipt", selfSend !== null, selfSend);
+check(
+  "the self-send is worth $1.00",
+  selfSend?.amountUsdc === "1.0",
+  selfSend?.amountUsdc,
+);
+check(
+  "the self-send carries the block and hash the receipt reports",
+  selfSend?.blockNumber === 4242n && selfSend?.txHash === "0x5e1f0001",
+  { block: selfSend?.blockNumber, hash: selfSend?.txHash },
+);
+check(
+  "a self-send is ignored when self-pays are not allowed",
+  nativePaymentFromReceipt(
+    { transactionHash: "0x5e1f0002" as Hex, from: MERCHANT, to: MERCHANT, value: 10n ** 18n, blockNumber: 4242n },
+    { merchant: MERCHANT },
+  ) === null,
+  "a merchant crediting itself was treated as a payment",
+);
+check(
+  "a receipt paying someone else is not a payment",
+  nativePaymentFromReceipt(
+    { transactionHash: "0x5e1f0003" as Hex, from: PAYER_A, to: PAYER_B, value: 10n ** 18n, blockNumber: 4242n },
+    { merchant: MERCHANT, allowSelfTransfer: true },
+  ) === null,
+  "someone else's receipt was adopted",
+);
+check(
+  "a reverted native send is not a payment",
+  nativePaymentFromReceipt(
+    { transactionHash: "0x5e1f0004" as Hex, from: PAYER_A, to: MERCHANT, value: 10n ** 18n, blockNumber: 4242n, status: "reverted" },
+    { merchant: MERCHANT },
+  ) === null,
+  "a reverted transaction opened the door",
+);
+check(
+  "a contract creation is not a payment",
+  nativePaymentFromReceipt(
+    { transactionHash: "0x5e1f0005" as Hex, from: PAYER_A, to: null, value: 10n ** 18n, blockNumber: 4242n },
+    { merchant: MERCHANT },
+  ) === null,
+  "a contract creation was treated as payment",
+);
+check(
+  "a zero-value native send is not a payment",
+  nativePaymentFromReceipt(
+    { transactionHash: "0x5e1f0006" as Hex, from: PAYER_A, to: MERCHANT, value: 0n, blockNumber: 4242n },
+    { merchant: MERCHANT },
+  ) === null,
+  "a zero-value transfer counted",
+);
+// The dedupe guarantee: a payment that *was* mirrored arrives twice, once from the
+// emitter and once from the receipt, and must open the door exactly once.
+const mirrored = decodeTransferLog(
+  systemTransfer({ from: PAYER_A, to: MERCHANT, value: 10n ** 18n, blockNumber: 5000n, txHash: "0x6a1f0001" as Hex }),
+  { merchant: MERCHANT },
+);
+const mirroredReceipt = nativePaymentFromReceipt(
+  { transactionHash: "0x6a1f0001" as Hex, from: PAYER_A, to: MERCHANT, value: 10n ** 18n, blockNumber: 5000n, status: "success" },
+  { merchant: MERCHANT },
+);
+const bothSources = mergeFeed(
+  mergeFeed(EMPTY_FEED, mirrored ? [mirrored] : [], 20, 10n ** 18n, 4000n),
+  mirroredReceipt ? [mirroredReceipt] : [],
+  20,
+  10n ** 18n,
+  4000n,
+);
+check(
+  "a mirrored payment is still counted exactly once",
+  bothSources.total === 1 && bothSources.rows.length === 1,
+  { total: bothSources.total, rows: bothSources.rows.length },
+);
+check(
+  "a mirrored payment still opens the door",
+  bothSources.qualifying?.txHash === "0x6a1f0001",
+  bothSources.qualifying?.txHash,
+);
+
+// The watcher keeps asking until the transaction is actually mined.
+let attempts = 0;
+const mined: PaidEvent[] = [];
+const stopWatch = watchNativePayment({
+  publicClient: {
+    getTransactionReceipt: async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error("not found");
+      return { transactionHash: "0x7b2f0001", from: MERCHANT, to: MERCHANT, value: 10n ** 18n, blockNumber: 5001n, status: "success" };
+    },
+  },
+  txHash: "0x7b2f0001" as Hex,
+  merchant: MERCHANT,
+  allowSelfTransfer: true,
+  intervalMs: 1,
+  timeoutMs: 5_000,
+  onPaid: (event) => mined.push(event),
+});
+await new Promise((r) => setTimeout(r, 300));
+stopWatch();
+check("the watcher reports a payment once it is mined", mined.length === 1, `${mined.length} after ${attempts} attempts`);
+check("the reported payment is the one that was sent", mined[0]?.amountUsdc === "1.0", mined[0]?.amountUsdc);
+
+let orphanAttempts = 0;
+let orphan: PaidEvent[] = [];
+const stopOrphan = watchNativePayment({
+  publicClient: {
+    getTransactionReceipt: async () => {
+      orphanAttempts += 1;
+      return null;
+    },
+  },
+  txHash: "0x7c2f0001" as Hex,
+  merchant: MERCHANT,
+  allowSelfTransfer: true,
+  intervalMs: 1,
+  timeoutMs: 120,
+  onPaid: (event) => orphan.push(event),
+});
+await new Promise((r) => setTimeout(r, 400));
+stopOrphan();
+check("a transaction that never mines is given up on", orphan.length === 0 && orphanAttempts >= 2, `${orphan.length} reported, ${orphanAttempts} attempts`);
 
 console.log(`\n${failures === 0 ? "All checks passed." : `${failures} check(s) failed.`}`);
 process.exit(failures === 0 ? 0 : 1);

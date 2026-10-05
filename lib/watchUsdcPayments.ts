@@ -759,6 +759,136 @@ export async function inferPaymentSource(args: {
   }
 }
 
+/**
+ * Build a payment event from the transaction itself rather than from a log.
+ *
+ * The native door is `sendTransaction({ to, value })`, and a plain value transfer
+ * produces no contract log of its own: on Arc it only shows up because the EIP-7708
+ * system emitter mirrors it. That mirror is not guaranteed. Sending native currency
+ * to yourself emits nothing at all, and this demo defaults to paying the connected
+ * wallet, so that is exactly what "Pay $1 as native" does for a single-person run.
+ * The payment really lands; the emitter just never announces it, so a listener that
+ * only reads logs waits forever.
+ *
+ * The transaction is the primary record anyway. Once it is mined, its recipient and
+ * its value say what happened, so the app asks the chain directly instead of waiting
+ * to be told. Dedupe is by tx hash, so a payment that *is* mirrored is still counted
+ * exactly once.
+ */
+export function nativePaymentFromReceipt(
+  receipt: {
+    transactionHash: Hash;
+    from?: Address | null;
+    to?: Address | null;
+    value: bigint;
+    blockNumber: bigint;
+    status?: "success" | "reverted" | boolean;
+  },
+  options: { merchant: Address; minAmountUsdc?: string; allowSelfTransfer?: boolean },
+): PaidEvent | null {
+  const { merchant, minAmountUsdc = "0", allowSelfTransfer = false } = options;
+
+  // A reverted transaction moved nothing.
+  if (receipt.status === "reverted" || receipt.status === false) return null;
+  if (!receipt.to) return null;
+  if (receipt.to.toLowerCase() !== merchant.toLowerCase()) return null;
+
+  const from = receipt.from;
+  if (!from) return null;
+  if (!allowSelfTransfer && from.toLowerCase() === receipt.to.toLowerCase()) return null;
+
+  const value = receipt.value;
+  if (value <= 0n) return null;
+
+  const nativeValue = value;
+  if (minAmountUsdc !== "0") {
+    const min = parseUnits(minAmountUsdc, USDC_NATIVE_DECIMALS);
+    if (nativeValue < min) return null;
+  }
+
+  return {
+    from: from.toLowerCase() as Address,
+    to: receipt.to.toLowerCase() as Address,
+    amountUsdc: nativeValueToUsdc(nativeValue),
+    nativeValue,
+    txHash: receipt.transactionHash,
+    blockNumber: receipt.blockNumber,
+    source: "system-emitter",
+  };
+}
+
+/**
+ * Poll one sent transaction until it is mined, then report it as a payment if it
+ * really did send native currency to the merchant.
+ *
+ * Returns an unsubscribe function. Stops on the first matching receipt, and gives
+ * up after `timeoutMs` so a dropped transaction cannot poll forever.
+ */
+export function watchNativePayment(args: {
+  publicClient: {
+    getTransactionReceipt: (params: { hash: Hash }) => Promise<unknown>;
+  };
+  txHash: Hash;
+  merchant: Address;
+  allowSelfTransfer?: boolean;
+  intervalMs?: number;
+  timeoutMs?: number;
+  onPaid: (event: PaidEvent) => void;
+}): () => void {
+  const { publicClient, txHash, merchant, allowSelfTransfer = false, onPaid } = args;
+  const intervalMs = args.intervalMs ?? 2_000;
+  const timeoutMs = args.timeoutMs ?? 180_000;
+
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const startedAt = Date.now();
+
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const receipt = (await publicClient.getTransactionReceipt({ hash: txHash })) as {
+        transactionHash?: Hash;
+        from?: Address | null;
+        to?: Address | null;
+        value?: bigint;
+        blockNumber?: bigint;
+        status?: "success" | "reverted" | boolean;
+      } | null;
+      if (receipt && receipt.blockNumber !== undefined && receipt.transactionHash) {
+        const event = nativePaymentFromReceipt(
+          {
+            transactionHash: receipt.transactionHash,
+            from: receipt.from,
+            to: receipt.to,
+            value: receipt.value ?? 0n,
+            blockNumber: receipt.blockNumber,
+            status: receipt.status,
+          },
+          { merchant, allowSelfTransfer },
+        );
+        if (event) {
+          onPaid(event);
+          return;
+        }
+      }
+    } catch {
+      // Not mined yet, or the node is briefly unavailable. Keep trying.
+    }
+    if (stopped || Date.now() - startedAt >= timeoutMs) return;
+    timer = setTimeout(() => void tick(), intervalMs);
+  };
+
+  void tick();
+
+  return function stop() {
+    stopped = true;
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+}
+
 function message(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
