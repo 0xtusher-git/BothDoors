@@ -50,3 +50,46 @@ export function clearSessionStart(key: string): void {
     /* private mode, not worth surfacing */
   }
 }
+
+const PENDING_PREFIX = "bothdoors.pending.";
+
+/**
+ * The native transaction this page is still waiting on.
+ *
+ * Watching a sent transaction normally lives in memory, which is fine right up
+ * until the page reloads - and a reload is exactly what someone does after paying
+ * to check whether it went through. The watcher dies with the component, the hash
+ * dies with it, and a payment that did land goes unconfirmed forever while the page
+ * insists it is still waiting.
+ *
+ * So the hash is kept per merchant and chain until the payment is confirmed. The
+ * page picks it up again on the next load and keeps watching.
+ */
+export function pendingTxKey(merchant: string, chainId: number): string {
+  return `${PENDING_PREFIX}${chainId}:${merchant.toLowerCase()}`;
+}
+
+export function readPendingTx(key: string): `0x${string}` | null {
+  try {
+    const saved = window.localStorage.getItem(key);
+    return saved && /^0x[0-9a-f]{64}$/i.test(saved) ? (saved as `0x${string}`) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writePendingTx(key: string, hash: `0x${string}`): void {
+  try {
+    window.localStorage.setItem(key, hash);
+  } catch {
+    /* private mode, not worth surfacing */
+  }
+}
+
+export function clearPendingTx(key: string): void {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    /* private mode, not worth surfacing */
+  }
+}

@@ -25,7 +25,16 @@ import {
 } from "@/lib/chain";
 import { DEFAULT_CHAIN_ID, MERCHANT_ADDRESS, MERCHANT_ADDRESS_INVALID } from "@/lib/env";
 import { formatDollars, formatUsdcFromErc20, formatUsdcFromNative, shortAddress } from "@/lib/format";
-import { clearSessionStart, readSessionStart, sessionKey, writeSessionStart } from "@/lib/session";
+import {
+  clearPendingTx,
+  clearSessionStart,
+  pendingTxKey,
+  readPendingTx,
+  readSessionStart,
+  sessionKey,
+  writePendingTx,
+  writeSessionStart,
+} from "@/lib/session";
 import { useLegacyWalletConnectors } from "@/lib/useLegacyWalletConnectors";
 import { listWallets, type WalletOption } from "@/lib/wallets";
 import { useMounted } from "@/lib/useMounted";
@@ -449,13 +458,17 @@ export function PayDemo() {
         // value say what happened. Deduped by hash, so a payment that *was*
         // mirrored is still counted once.
         if (door === "native") {
+          const pendingKey = pendingTxKey(merchant, paidOnChain);
+          // Persist before watching. A reload must not lose the payment.
+          writePendingTx(pendingKey, hash);
           nativeWatchers.current.push(
             watchNativePayment({
-              publicClient: receiptClient ?? publicClient,
+              publicClient,
               txHash: hash,
               merchant,
               allowSelfTransfer: isDemoSelfPay,
               onPaid: (event) => {
+                clearPendingTx(pendingKey);
                 if (readChainIdRef.current !== paidOnChain) return;
                 addRows([event]);
               },
@@ -472,6 +485,35 @@ export function PayDemo() {
     },
     [walletClient, merchant, readChain, queryClient, armSession],
   );
+
+  // ---- resume an unconfirmed native payment -------------------------------
+  // A native transaction the page sent and never saw confirmed. Reloading after
+  // paying is the normal thing to do, and an in-memory watcher does not survive it:
+  // the payment landed, the app forgot the hash, and the status sat on Waiting
+  // forever pointing at nothing. Picking the hash back up closes that.
+  useEffect(() => {
+    if (!publicClient || !merchant) return;
+    const pendingKey = pendingTxKey(merchant, readChainId);
+    const hash = readPendingTx(pendingKey);
+    if (!hash) return;
+    // Show what is being waited on, so the page links the transaction instead of
+    // looking like it is waiting for nothing in particular.
+    setAwaiting({ door: "native", txHash: hash });
+    const stop = watchNativePayment({
+      publicClient,
+      txHash: hash,
+      merchant,
+      allowSelfTransfer: isDemoSelfPay,
+      onPaid: (event) => {
+        clearPendingTx(pendingKey);
+        if (readChainIdRef.current !== readChainId) return;
+        addRows([event]);
+        setAwaiting((current) => (current?.txHash === hash ? null : current));
+      },
+    });
+    nativeWatchers.current.push(stop);
+    return () => stop();
+  }, [publicClient, receiptClient, merchant, readChainId, isDemoSelfPay, addRows]);
 
   const handleCopy = useCallback(async () => {
     if (!merchant) return;

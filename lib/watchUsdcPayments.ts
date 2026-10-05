@@ -821,11 +821,17 @@ export function nativePaymentFromReceipt(
  * Poll one sent transaction until it is mined, then report it as a payment if it
  * really did send native currency to the merchant.
  *
+ * The amount comes from the *transaction*, not the receipt. A receipt carries
+ * `from`, `to`, `blockNumber` and `status` but no `value`, so reading it from there
+ * silently yields zero and every native payment goes undetected - which looks
+ * exactly like the app ignoring a payment that worked.
+ *
  * Returns an unsubscribe function. Stops on the first matching receipt, and gives
  * up after `timeoutMs` so a dropped transaction cannot poll forever.
  */
 export function watchNativePayment(args: {
   publicClient: {
+    getTransaction: (params: { hash: Hash }) => Promise<unknown>;
     getTransactionReceipt: (params: { hash: Hash }) => Promise<unknown>;
   };
   txHash: Hash;
@@ -848,19 +854,21 @@ export function watchNativePayment(args: {
     try {
       const receipt = (await publicClient.getTransactionReceipt({ hash: txHash })) as {
         transactionHash?: Hash;
-        from?: Address | null;
-        to?: Address | null;
-        value?: bigint;
         blockNumber?: bigint;
         status?: "success" | "reverted" | boolean;
       } | null;
-      if (receipt && receipt.blockNumber !== undefined && receipt.transactionHash) {
+      if (receipt?.blockNumber !== undefined && receipt.transactionHash) {
+        const tx = (await publicClient.getTransaction({ hash: txHash })) as {
+          from?: Address | null;
+          to?: Address | null;
+          value?: bigint;
+        } | null;
         const event = nativePaymentFromReceipt(
           {
             transactionHash: receipt.transactionHash,
-            from: receipt.from,
-            to: receipt.to,
-            value: receipt.value ?? 0n,
+            from: tx?.from,
+            to: tx?.to,
+            value: tx?.value ?? 0n,
             blockNumber: receipt.blockNumber,
             status: receipt.status,
           },
@@ -870,6 +878,8 @@ export function watchNativePayment(args: {
           onPaid(event);
           return;
         }
+        // Mined, but it did not pay the merchant: nothing left to wait for.
+        return;
       }
     } catch {
       // Not mined yet, or the node is briefly unavailable. Keep trying.

@@ -146,7 +146,7 @@ for the native door. Same `$1`, two decimal bases.
 | 15 | A native payment is confirmed from the transaction, not just from the emitter log | `npm test` "Native door" - Arc does not emit a system-emitter log when native currency is sent to yourself (0 self-sends in 74,522 emitter Transfers over 6000 blocks on both chains), and with no `NEXT_PUBLIC_MERCHANT_ADDRESS` set this demo pays the connected wallet, so the native door was unconfirmable and waited forever. The receipt of the transaction the app sent is now polled directly. Checks that a self-send is recognised, a reverted or zero-value send is not, and a payment that was mirrored is still counted exactly once |
 
 ```bash
-npm test                 # 124 checks, synthetic chain, no network needed
+npm test                 # 126 checks, synthetic chain, no network needed
 npm run typecheck        # tsc --noEmit, strict
 npm run build            # production build
 
@@ -238,6 +238,16 @@ self-sends across 74,522 emitter Transfers on both chains - and with no
 `NEXT_PUBLIC_MERCHANT_ADDRESS` set this demo pays the connected wallet, so that is
 exactly what "Pay $1 as native" does when one person runs the demo alone. The
 payment lands, the emitter never announces it, and the status waits forever.
+
+The amount is read from the **transaction**, not the receipt: a receipt carries
+`from`, `to`, `blockNumber` and `status` but no `value`, so reading it from there
+yields zero and every native payment goes undetected — indistinguishable from the
+app ignoring a payment that worked.
+
+The hash is kept per merchant and chain until the payment is confirmed, because
+reloading after paying to check whether it went through is the normal thing to do
+and an in-memory watcher does not survive a reload. The page picks the hash back up
+on the next load and keeps watching.
 
 So the native door also watches the transaction it just sent. Once mined, a
 transaction's recipient and value say what happened, and the app asks the chain

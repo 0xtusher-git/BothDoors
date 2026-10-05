@@ -1057,6 +1057,12 @@ check(
 );
 
 // The watcher keeps asking until the transaction is actually mined.
+//
+// The stubs below deliberately mirror what viem really returns. A receipt has
+// `from`, `to`, `blockNumber` and `status` but NO `value`; `value` lives on the
+// transaction. Reading the amount from the receipt instead yields zero and no
+// native payment is ever detected, which is indistinguishable from the app
+// ignoring a payment that worked.
 let attempts = 0;
 const mined: PaidEvent[] = [];
 const stopWatch = watchNativePayment({
@@ -1064,8 +1070,9 @@ const stopWatch = watchNativePayment({
     getTransactionReceipt: async () => {
       attempts += 1;
       if (attempts < 3) throw new Error("not found");
-      return { transactionHash: "0x7b2f0001", from: MERCHANT, to: MERCHANT, value: 10n ** 18n, blockNumber: 5001n, status: "success" };
+      return { transactionHash: "0x7b2f0001", blockNumber: 5001n, status: "success" };
     },
+    getTransaction: async () => ({ from: MERCHANT, to: MERCHANT, value: 10n ** 18n }),
   },
   txHash: "0x7b2f0001" as Hex,
   merchant: MERCHANT,
@@ -1077,7 +1084,26 @@ const stopWatch = watchNativePayment({
 await new Promise((r) => setTimeout(r, 300));
 stopWatch();
 check("the watcher reports a payment once it is mined", mined.length === 1, `${mined.length} after ${attempts} attempts`);
-check("the reported payment is the one that was sent", mined[0]?.amountUsdc === "1.0", mined[0]?.amountUsdc);
+check("the amount is read from the transaction, not the receipt", mined[0]?.amountUsdc === "1.0", mined[0]?.amountUsdc);
+check("the reported block comes from the receipt", mined[0]?.blockNumber === 5001n, mined[0]?.blockNumber);
+
+// A receipt with no value anywhere must not invent a payment.
+let noValue: PaidEvent[] = [];
+const stopNoValue = watchNativePayment({
+  publicClient: {
+    getTransactionReceipt: async () => ({ transactionHash: "0x7b2f0002", blockNumber: 5002n, status: "success" }),
+    getTransaction: async () => ({ from: PAYER_A, to: MERCHANT }),
+  },
+  txHash: "0x7b2f0002" as Hex,
+  merchant: MERCHANT,
+  allowSelfTransfer: true,
+  intervalMs: 1,
+  timeoutMs: 400,
+  onPaid: (event) => noValue.push(event),
+});
+await new Promise((r) => setTimeout(r, 300));
+stopNoValue();
+check("a transaction with no readable value is not a payment", noValue.length === 0, `${noValue.length} invented`);
 
 let orphanAttempts = 0;
 let orphan: PaidEvent[] = [];
@@ -1087,6 +1113,7 @@ const stopOrphan = watchNativePayment({
       orphanAttempts += 1;
       return null;
     },
+    getTransaction: async () => ({ from: PAYER_A, to: MERCHANT, value: 10n ** 18n }),
   },
   txHash: "0x7c2f0001" as Hex,
   merchant: MERCHANT,
