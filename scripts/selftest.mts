@@ -24,6 +24,8 @@ import {
   nativePaymentFromReceipt,
   watchNativePayment,
   watchUsdcPayments,
+  confirmEmitterPayment,
+  confirmEmitterEvents,
   type PaidEvent,
   type TransferLogLike,
   type UsdcLogClient,
@@ -155,6 +157,13 @@ function receiptClientFor(logs: TransferLogLike[]) {
         .filter((log) => log.transactionHash === hash)
         .map((log) => ({ address: log.address })),
     }),
+    getTransaction: async ({ hash }: { hash: Hex }) => {
+      const log = logs.find((l) => l.transactionHash === hash);
+      return {
+        to: log ? log.topics[2]?.slice(-40) : undefined,
+        value: undefined,
+      };
+    },
   };
 }
 
@@ -183,7 +192,7 @@ let emitted: PaidEvent[] = [];
 console.log("BothDoors listener self-test\n");
 
 // --- acceptance test 1 + 2: both doors are detected -----------------------
-console.log("Acceptance 1 and 2 — token pay and native pay both go PAID");
+console.log("Acceptance 1 and 2 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â token pay and native pay both go PAID");
 {
   clearSeenPayments(MERCHANT, "t1");
   const tokenTx = "0xaa0000000000000000000000000000000000000000000000000000000000aa01" as Hex;
@@ -232,7 +241,7 @@ console.log("Acceptance 1 and 2 — token pay and native pay both go PAID");
 }
 
 // --- acceptance test 3: history on page load ------------------------------
-console.log("\nAcceptance 3 — history load shows incoming transfers");
+console.log("\nAcceptance 3 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â history load shows incoming transfers");
 {
   clearSeenPayments(MERCHANT, "t2");
   const logs: TransferLogLike[] = [
@@ -251,7 +260,7 @@ console.log("\nAcceptance 3 — history load shows incoming transfers");
 }
 
 // --- acceptance test 3b: the lookback is a real range, read in chunks -------
-console.log("\nAcceptance 3b — a node that refuses wide chunks still gets read");
+console.log("\nAcceptance 3b ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â a node that refuses wide chunks still gets read");
 {
   clearSeenPayments(MERCHANT, "t3");
   const logs: TransferLogLike[] = [
@@ -289,7 +298,7 @@ console.log("\nAcceptance 3b — a node that refuses wide chunks still gets read
   );
 }
 
-console.log("\nAcceptance 3d — an unreadable chunk keeps what was already read");
+console.log("\nAcceptance 3d ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â an unreadable chunk keeps what was already read");
 {
   clearSeenPayments(MERCHANT, "t3d");
   const near = "0xee04000000000000000000000000000000000000000000000000000000000004" as Hex;
@@ -304,7 +313,7 @@ console.log("\nAcceptance 3d — an unreadable chunk keeps what was already read
   check("with an error for the UI to show", result.errors.length > 0, result.errors);
 }
 
-console.log("\nAcceptance 3c — chunking reaches back past any single-response cap");
+console.log("\nAcceptance 3c ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â chunking reaches back past any single-response cap");
 {
   // The bug this replaces: the token source was capped at the last 100 blocks, so
   // a payment 400 blocks old was invisible forever. Arc testnet blocks are ~100ms,
@@ -346,7 +355,7 @@ console.log("\nAcceptance 3c — chunking reaches back past any single-response 
 }
 
 // --- throttling is not an oversized range -----------------------------------
-console.log("\nAcceptance test 3e — a throttled chunk is waited out, not shrunk away");
+console.log("\nAcceptance test 3e ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â a throttled chunk is waited out, not shrunk away");
 {
   clearSeenPayments(MERCHANT, "t3e");
   const tx = "0xee04000000000000000000000000000000000000000000000000000000000004" as Hex;
@@ -420,7 +429,7 @@ console.log("\nAcceptance test 3e — a throttled chunk is waited out, not shrun
 }
 
 // --- the bug this file exists to prevent ------------------------------------
-console.log("\nRegression — an ERC-20 transfer Arc does NOT mirror into the emitter");
+console.log("\nRegression ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â an ERC-20 transfer Arc does NOT mirror into the emitter");
 {
   // Arc emits no system-emitter log for an ERC-20 self-transfer, so the emitter
   // alone is blind to it. Only the ERC-20 contract shows the payment.
@@ -464,7 +473,7 @@ console.log("\nRegression — an ERC-20 transfer Arc does NOT mirror into the em
   check("poller finds the unmirrored self-send", got.done && emitted.length === 1, emitted.length);
 }
 
-console.log("\nRegression — a transfer mirrored into BOTH logs is still reported once");
+console.log("\nRegression ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â a transfer mirrored into BOTH logs is still reported once");
 {
   clearSeenPayments(MERCHANT, "t7");
   const tx = "0xbb04000000000000000000000000000000000000000000000000000000000004" as Hex;
@@ -481,7 +490,7 @@ console.log("\nRegression — a transfer mirrored into BOTH logs is still report
 }
 
 // --- acceptance test 4: no double counting --------------------------------
-console.log("\nAcceptance 4 — the same tx is never reported twice");
+console.log("\nAcceptance 4 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â the same tx is never reported twice");
 {
   clearSeenPayments(MERCHANT, "t4");
   const tx = "0xee01000000000000000000000000000000000000000000000000000000000001" as Hex;
@@ -546,7 +555,7 @@ console.log("\nAcceptance 4 — the same tx is never reported twice");
 }
 
 // --- acceptance test 5: amounts are dollars -------------------------------
-console.log("\nAcceptance 5 — 1 USDC displays as 1.00, never 1e12 or 1e-12");
+console.log("\nAcceptance 5 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â 1 USDC displays as 1.00, never 1e12 or 1e-12");
 {
   check("1e18 native -> '1.0'", nativeValueToUsdc(10n ** 18n) === "1.0", nativeValueToUsdc(10n ** 18n));
   // The trap the spec warns about: raw units are not dollars.
@@ -574,7 +583,7 @@ console.log("\nAcceptance 5 — 1 USDC displays as 1.00, never 1e12 or 1e-12");
 }
 
 // --- ignore rules --------------------------------------------------------
-console.log("\nIgnore rules — zero value, self-sends, wrong recipient");
+console.log("\nIgnore rules ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â zero value, self-sends, wrong recipient");
 {
   const zero = systemTransfer({ from: PAYER_A, to: MERCHANT, value: 0n, blockNumber: 10n, txHash: "0x2a01" });
   const self = systemTransfer({ from: MERCHANT, to: MERCHANT, value: 10n ** 18n, blockNumber: 11n, txHash: "0x2a02" });
@@ -609,7 +618,7 @@ console.log("\nTopic encoding");
 }
 
 // --- the counting the UI actually does -------------------------------------
-console.log("\nFeed counting — one tx is one row, and the total is honest");
+console.log("\nFeed counting ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â one tx is one row, and the total is honest");
 {
   const ev = (txHash: Hex, blockNumber: bigint, source: PaidEvent["source"] = "token-contract"): PaidEvent => ({
     from: PAYER_A,
@@ -644,7 +653,7 @@ console.log("\nFeed counting — one tx is one row, and the total is honest");
 
   // The dedupe set has to outlive the display window. History is read with
   // `markSeen: false`, and StrictMode re-runs that read, so the full 34 come back
-  // a second time — including the 14 that scrolled out of the 20-row window.
+  // a second time ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â including the 14 that scrolled out of the 20-row window.
   // Rebuilding the set from `rows` would count those 14 twice: 68 for 34 payments.
   const recapped = mergeFeed(capped, many, 20, PRICE);
   check("re-reading a capped feed does not double-count", recapped.total === 34, recapped.total);
@@ -712,7 +721,7 @@ console.log("\nFeed counting — one tx is one row, and the total is honest");
 }
 
 // --- a discarded history read must not swallow the payment -----------------
-console.log("\nRecovery — an abandoned history read does not lose the payment");
+console.log("\nRecovery ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â an abandoned history read does not lose the payment");
 {
   clearSeenPayments(MERCHANT, "t8");
   const tx = "0xcc05000000000000000000000000000000000000000000000000000000000005" as Hex;
@@ -839,7 +848,7 @@ check(
 
 // --- a payment from history must not open the door --------------------------
 // The reported bug: the shop showed PAID ~2s after pressing "Pay $1 as native",
-// with no transaction ever made. Nothing was fabricated — the 5000-block
+// with no transaction ever made. Nothing was fabricated ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â the 5000-block
 // history read found a real earlier $1 payment and merged it through the same
 // path the poller uses, so the door opened before the user pressed anything and
 // both pay buttons (which are disabled once paid) silently did nothing.
@@ -1125,6 +1134,128 @@ const stopOrphan = watchNativePayment({
 await new Promise((r) => setTimeout(r, 400));
 stopOrphan();
 check("a transaction that never mines is given up on", orphan.length === 0 && orphanAttempts >= 2, `${orphan.length} reported, ${orphanAttempts} attempts`);
+
+// ---------------------------------------------------------------------------
+// The emitter mirrors EVERY token, not just USDC.
+//
+// Mainnet evidence, 2026-10-05: this transaction's receipt contained no USDC log
+// at all, yet the emitter's Transfer to the merchant decoded as a qualifying
+// payment of 2274.985130544037933806 USDC - the full 18-decimal precision of
+// whichever 18-decimal token actually moved. An emitter event is only a
+// candidate until the transaction behind it agrees.
+// ---------------------------------------------------------------------------
+
+const OTHER_TOKEN = "0x4444444444444444444444444444444444444444" as Address;
+const impostor: PaidEvent = {
+  from: PAYER_A,
+  to: MERCHANT,
+  amountUsdc: "2274.985130544037933806",
+  nativeValue: 2274985130544037933806n,
+  txHash: "0xaaa00001" as Hex,
+  blockNumber: 5001n,
+  source: "system-emitter",
+};
+
+// Receipt has no USDC log and the tx moved no native value: some other token.
+const rejector = {
+  getTransactionReceipt: async () => ({
+    logs: [
+      { address: SYSTEM_EMITTER },
+      { address: OTHER_TOKEN },
+    ] as readonly { address: Address }[],
+  }),
+  getTransaction: async () => ({ to: OTHER_TOKEN, value: 0n }),
+};
+const keptImpostor = await confirmEmitterPayment(rejector, impostor, { merchant: MERCHANT });
+check("an emitter log of a different token is not counted as USDC", keptImpostor === null, keptImpostor?.amountUsdc);
+
+// Receipt has no USDC log, but the tx itself moved native value to the merchant:
+// that is the native door, and the emitter's number is already the native value.
+const nativish: PaidEvent = {
+  from: PAYER_A,
+  to: MERCHANT,
+  amountUsdc: "1.0",
+  nativeValue: 10n ** 18n,
+  txHash: "0xaaa00002" as Hex,
+  blockNumber: 5001n,
+  source: "system-emitter",
+};
+const keptNative = await confirmEmitterPayment(
+  {
+    getTransactionReceipt: async () => ({ logs: [{ address: SYSTEM_EMITTER }] as readonly { address: Address }[] }),
+    getTransaction: async () => ({ to: MERCHANT, value: 10n ** 18n }),
+  },
+  nativish,
+  { merchant: MERCHANT },
+);
+check("an emitter log backed by a real native transfer is kept", keptNative !== null, keptNative?.amountUsdc);
+
+// Receipt DOES carry the USDC log: a genuine USDC transfer Arc mirrored. Relabel
+// it, so the row names the door it came through instead of needing a receipt.
+const mirroredLog: PaidEvent = { ...nativish, txHash: "0xaaa00003" as Hex };
+const keptMirror = await confirmEmitterPayment(
+  {
+    getTransactionReceipt: async () => ({
+      logs: [{ address: USDC_ERC20_ADDRESS }, { address: SYSTEM_EMITTER }] as readonly { address: Address }[],
+    }),
+    getTransaction: async () => ({ to: MERCHANT, value: 0n }),
+  },
+  mirroredLog,
+  { merchant: MERCHANT },
+);
+check(
+  "a mirrored USDC transfer is labelled token-contract, not system-emitter",
+  keptMirror?.source === "token-contract",
+  keptMirror?.source,
+);
+
+// A token-contract event needs no corroboration and must pass straight through,
+// even when the client cannot check anything at all.
+const plain: PaidEvent = { ...impostor, txHash: "0xaaa00004" as Hex, source: "token-contract" };
+const mixed = await confirmEmitterEvents(rejector, [plain, impostor], { merchant: MERCHANT });
+check("token-contract events are never second-guessed", mixed.length === 1 && mixed[0]?.txHash === plain.txHash, mixed.length);
+
+// A client that cannot fetch receipts is trusted as-is, rather than being made to
+// report nothing at all. The app's real viem client can always check.
+const unchecked = await confirmEmitterEvents({} as never, [impostor], { merchant: MERCHANT });
+check("a client that cannot corroborate is trusted rather than silenced", unchecked.length === 1, unchecked.length);
+
+// End to end through the real reader: an impostor emitter log in the same
+// response as a real USDC transfer yields exactly the USDC payment.
+const impostorLog = systemTransfer({
+  from: PAYER_A,
+  to: MERCHANT,
+  value: 2274985130544037933806n,
+  txHash: "0xaaa00005" as Hex,
+  blockNumber: 5001n,
+});
+const realUsdcLog = tokenTransfer({
+  from: PAYER_A,
+  to: MERCHANT,
+  value: 1000000n,
+  txHash: "0xaaa00006" as Hex,
+  blockNumber: 5001n,
+});
+const e2e = await fetchRecentPayments({
+  publicClient: {
+      ...fakeChain({ logs: [impostorLog, realUsdcLog], head: 5001n }).client,
+    getTransactionReceipt: async ({ hash }: { hash: Hex }) => ({
+      logs:
+        hash === realUsdcLog.transactionHash
+          ? ([{ address: USDC_ERC20_ADDRESS }] as readonly { address: Address }[])
+          : ([{ address: OTHER_TOKEN }] as readonly { address: Address }[]),
+    }),
+    getTransaction: async () => ({ to: OTHER_TOKEN, value: 0n }),
+  } as never,
+  merchant: MERCHANT,
+  dedupeKey: "emitter-confirm",
+  lookbackBlocks: 5n,
+});
+check(
+  "history drops the other token and keeps the real USDC transfer",
+  e2e.events.length === 1 && e2e.events[0]?.amountUsdc === "1.0",
+  JSON.stringify(e2e.events.map((e) => `${e.amountUsdc}/${e.source}`)),
+);
 
 console.log(`\n${failures === 0 ? "All checks passed." : `${failures} check(s) failed.`}`);
 process.exit(failures === 0 ? 0 : 1);

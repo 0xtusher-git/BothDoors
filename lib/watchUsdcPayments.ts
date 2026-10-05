@@ -472,8 +472,17 @@ export async function fetchRecentPayments(
     ...collect(emitterRead.logs, { ...options, merchant }),
   ];
 
+  // The emitter mirrors every token, so its events are only candidates until the
+  // transaction behind them agrees. Deduping first means a mirrored USDC transfer
+  // is already settled by its ERC-20 event and is never looked up twice.
+  const deduped = dedupeEvents(events, options);
+  const confirmed = await confirmEmitterEvents(publicClient as EmitterCheckClient, deduped, {
+    merchant,
+    onError,
+  });
+
   return {
-    events: dedupeEvents(events, options),
+    events: confirmed,
     fromBlock,
     toBlock,
     truncated: !tokenRead.complete || !emitterRead.complete,
@@ -505,6 +514,117 @@ function collect(logs: readonly TransferLogLike[], options: DecodeOptions): Paid
     if (event) events.push(event);
   }
   return events.sort((a, b) => (a.blockNumber === b.blockNumber ? 0 : a.blockNumber > b.blockNumber ? -1 : 1));
+}
+
+export type EmitterCheckClient = {
+  getTransactionReceipt?: (args: { hash: Hash }) => Promise<{ logs: readonly { address: Address }[] }>;
+  getTransaction?: (args: {
+    hash: Hash;
+  }) => Promise<{ to?: Address | null; value?: bigint | null }>;
+};
+
+/**
+ * Can this client corroborate an emitter event at all? A client that cannot is
+ * trusted as-is, which is why this is a capability check rather than an
+ * assertion: the app's real viem client always can, and a caller that cannot
+ * gets the old, uncorroborated behaviour instead of silently seeing nothing.
+ */
+function canConfirmEmitter(client: EmitterCheckClient): boolean {
+  return typeof client.getTransactionReceipt === "function";
+}
+
+/**
+ * Decide whether an event decoded from the system emitter is really USDC.
+ *
+ * The emitter is not a USDC feed. It mirrors every ERC-20 that moves on Arc, plus
+ * plain value transfers, so a Transfer log there is only a *candidate*. Decoding
+ * it on its own credits whatever token happened to move: a transfer of an
+ * 18-decimal token mirrors 1:1 and reads as a full-precision USDC amount. On
+ * mainnet this app found a qualifying "payment" of 2274.985130544037933806 USDC
+ * whose receipt contained no USDC log at all.
+ *
+ * So an emitter event has to be corroborated by the transaction it came from:
+ *
+ *   - the receipt carries a USDC Transfer log  -> it is a real USDC transfer that
+ *     Arc mirrored. The amount is already correct, because Arc lifts 6 decimals
+ *     into 18. Accept.
+ *   - the transaction itself moved native value to the merchant -> the native
+ *     door. Accept.
+ *   - neither -> some other token moved. Reject.
+ *
+ * A payment mirrored into both logs is normally caught by hash dedupe before this
+ * runs, because the ERC-20 contract is read first. This is the safety net for the
+ * case where that read failed or came back incomplete: a corroboration failure is
+ * dropped rather than counted, because paying for the wrong thing is worse than
+ * showing nothing.
+ */
+export async function confirmEmitterPayment(
+  client: EmitterCheckClient,
+  event: PaidEvent,
+  options: { merchant: Address },
+): Promise<PaidEvent | null> {
+  if (!canConfirmEmitter(client)) return event;
+
+  const merchant = options.merchant.toLowerCase();
+  let hasUsdcLog = false;
+  let receiptReadable = false;
+  if (client.getTransactionReceipt) {
+    try {
+      const receipt = await client.getTransactionReceipt({ hash: event.txHash });
+      receiptReadable = true;
+      hasUsdcLog = receipt.logs.some(
+        (log) => log.address.toLowerCase() === USDC_ERC20_ADDRESS.toLowerCase(),
+      );
+    } catch {
+      // Unreadable receipt: fall through to the transaction check rather than
+      // trusting the emitter on its own.
+    }
+  }
+
+  if (hasUsdcLog) return { ...event, source: "token-contract" };
+
+  try {
+    const tx = await client.getTransaction?.({ hash: event.txHash });
+    const value = tx?.value ?? 0n;
+    if (value > 0n && typeof tx?.to === "string" && tx.to.toLowerCase() === merchant) {
+      // A plain value transfer. The emitter's own number is the native value, so
+      // the amount it decoded is already right.
+      return event;
+    }
+  } catch {
+    // fall through to the rejection below
+  }
+  // A receipt we could not read plus no native value is not enough to count it.
+  void receiptReadable;
+  return null;
+}
+
+/**
+ * Confirm every emitter-sourced event, dropping the ones that were some other
+ * token. Token-contract events are left alone: they are read from the USDC
+ * contract itself and need no corroboration.
+ */
+export async function confirmEmitterEvents(
+  client: EmitterCheckClient,
+  events: readonly PaidEvent[],
+  options: { merchant: Address; onError?: (error: unknown) => void },
+): Promise<PaidEvent[]> {
+  const out: PaidEvent[] = [];
+  for (const event of events) {
+    if (event.source !== "system-emitter") {
+      out.push(event);
+      continue;
+    }
+    try {
+      const confirmed = await confirmEmitterPayment(client, event, options);
+      if (confirmed) out.push(confirmed);
+    } catch (error) {
+      options.onError?.(error);
+    }
+  }
+  return out.sort((a, b) =>
+    a.blockNumber === b.blockNumber ? 0 : a.blockNumber > b.blockNumber ? -1 : 1,
+  );
 }
 
 /**
@@ -663,14 +783,26 @@ export function watchUsdcPayments(options: WatchUsdcPaymentsOptions): () => void
             sourceErrors += 1;
             lastSourceError = "incomplete log read";
           }
-          for (const log of read.logs) {
-            if (stopped) return;
-            const event = decodeTransferLog(log, decodeOptions);
-            if (!event) continue;
+          const candidates = collect(read.logs, decodeOptions);
+          // Only the emitter's own events need corroborating. Doing it before the
+          // hash check would repeat a receipt lookup for every mirrored USDC
+          // transfer, so dedupe first and confirm what survives.
+          const fresh: PaidEvent[] = [];
+          for (const event of candidates) {
             // One event per tx hash: a token transfer that Arc also mirrors into
             // the system emitter must not be reported twice.
             if (seen.has(event.txHash)) continue;
             seen.add(event.txHash);
+            fresh.push(event);
+          }
+          const confirmed =
+            address === SYSTEM_EMITTER
+              ? await confirmEmitterEvents(publicClient as EmitterCheckClient, fresh, {
+                  merchant,
+                })
+              : fresh;
+          for (const event of confirmed) {
+            if (stopped) return;
             onPaid(event);
           }
         }
